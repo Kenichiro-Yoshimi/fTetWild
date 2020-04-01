@@ -84,7 +84,7 @@ namespace floatTetWild {
             for(const auto fid : ff)
                 F.push_back(Vector3i(fid(0)+offset, fid(1)+offset, fid(2)+offset));
 
-            tags.insert(tags.begin()+size, Fs[id].size(), id);
+            tags.insert(tags.begin()+size, Fs[id].size(), 0);
             size += Fs[id].size();
             offset += Vs[id].size();
         }
