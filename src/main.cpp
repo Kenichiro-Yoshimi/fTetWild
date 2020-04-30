@@ -216,6 +216,7 @@ int main(int argc, char **argv) {
     command_line.add_flag("--disable-wn", disable_wn, "Disable winding number.");
     bool use_floodfill = false;
     command_line.add_flag("--use-floodfill", use_floodfill, "Use flood-fill to extract interior volume.");
+    command_line.add_flag("--use-general-wn", params.use_general_wn, "Use general winding number.");
 
 
 #ifdef LIBIGL_WITH_TETGEN
@@ -340,10 +341,12 @@ int main(int argc, char **argv) {
 
         parser.get_meshes(inputs_file, meshes);
 
-        if(parser.load_and_merge(meshes, input_vertices, input_faces, sf_mesh, input_tags)) {
+        if(parser.load_and_merge(params, meshes, input_vertices, input_faces, sf_mesh, input_tags)) {
             input_bbox_mins = parser.bbox_mins;
             input_bbox_maxes = parser.bbox_maxes;
             target_edge_lengths = parser.target_edge_lengths;
+            // simplification has been done already
+            skip_simplify = true;
         } else
             return EXIT_FAILURE;
     }

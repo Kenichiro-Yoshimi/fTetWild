@@ -9,6 +9,7 @@
 #pragma once
 
 #include <floattetwild/Types.hpp>
+#include <floattetwild/Parameters.h>
 
 #include <geogram/mesh/mesh.h>
 
@@ -27,13 +28,14 @@ public:
         get_meshes_aux(input_files, meshes);
     }
 
-    bool load_and_merge(const std::vector<std::string> &meshes, std::vector<Vector3> &V, std::vector<Vector3i> &F, GEO::Mesh &sf_mesh, std::vector<int> &tags);
+    bool load_and_merge(Parameters &params, const std::vector<std::string> &meshes, std::vector<Vector3> &V, std::vector<Vector3i> &F, GEO::Mesh &sf_mesh, std::vector<int> &tags);
     void merge(const std::vector<std::vector<Vector3>> &Vs, const std::vector<std::vector<Vector3i>> &Fs, std::vector<Vector3> &V, std::vector<Vector3i> &F, GEO::Mesh &sf_mesh, std::vector<int> &tags);
 
     std::vector<Vector3> bbox_mins;
     std::vector<Vector3> bbox_maxes;
     std::vector<Scalar>  bbox_diag_lengths;
     std::vector<Scalar>  target_edge_lengths;
+    std::vector<bool>    skip_simplifies;
 
 private:
     void get_meshes_aux(const json &input_files_node, std::vector<std::string> &meshes);

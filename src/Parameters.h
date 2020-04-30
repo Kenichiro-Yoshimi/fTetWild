@@ -109,6 +109,8 @@ class Parameters
     Scalar eps_2_simplification;
     Scalar dd_simplification;
 
+    bool use_general_wn = false;
+
     std::vector<LocalBBox> local_bboxes;
 
     void set_local_bboxes(std::vector<Vector3> &bbox_mins, std::vector<Vector3> &bbox_maxes,
