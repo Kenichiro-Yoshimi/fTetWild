@@ -188,6 +188,7 @@ int main(int argc, char **argv) {
                             "ideal_edge_length = diag_of_bbox * L. (double, optional, default: 0.05)");
     command_line.add_option("-e,--epsr", params.eps_rel,
                             "epsilon = diag_of_bbox * EPS. (double, optional, default: 1e-3)");
+    command_line.add_option("--epsa", params.eps_input);
 
     command_line.add_option("--max-its", params.max_its, "");
     command_line.add_option("--stop-energy", params.stop_energy, "");
