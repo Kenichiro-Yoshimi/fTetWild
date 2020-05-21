@@ -32,6 +32,11 @@ namespace floatTetWild {
                    target_edge_length = file["target_edge_length"];                
                 target_edge_lengths.push_back(target_edge_length);
 
+                Scalar eps_input = -1;
+                if(file["epsa"].is_number())
+                    eps_input = file["epsa"];
+                eps_inputs.push_back(eps_input);
+
                 bool skip_simplify = false;
                 if(file["skip_simplify"].is_boolean())
                     skip_simplify = file["skip_simplify"];
@@ -39,7 +44,7 @@ namespace floatTetWild {
 
                 existings[name] = index++;
             }
-        }    
+        }
     }
 
     bool InputFilesParser::load_and_merge(Parameters &params, const std::vector<std::string> &meshes, std::vector<Vector3> &V, std::vector<Vector3i> &F, GEO::Mesh &sf_mesh, std::vector<int> &tags)
@@ -65,7 +70,10 @@ namespace floatTetWild {
             }
             AABBWrapper tree(tmp_mesh);
 
+            // set of parameters is a temporal copy to simplify each mesh.
             Parameters tmp_params(params);
+            tmp_params.eps_input = eps_inputs[i];
+
             if (!tmp_params.init(tree.get_sf_diag())) {
               return false;
             }

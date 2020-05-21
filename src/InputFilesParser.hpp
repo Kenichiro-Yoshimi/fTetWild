@@ -35,6 +35,7 @@ public:
     std::vector<Vector3> bbox_maxes;
     std::vector<Scalar>  bbox_diag_lengths;
     std::vector<Scalar>  target_edge_lengths;
+    std::vector<Scalar>  eps_inputs;
     std::vector<bool>    skip_simplifies;
 
 private:
