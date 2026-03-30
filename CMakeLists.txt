@@ -1,5 +1,14 @@
 ################################################################################
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.10)
+
+# This project manages all dependencies via DownloadProject and does not use vcpkg.
+# If CMAKE_TOOLCHAIN_FILE points to a non-existent file (e.g. a stale vcpkg entry),
+# clear it before project() tries to load it.
+if(DEFINED CMAKE_TOOLCHAIN_FILE AND NOT EXISTS "${CMAKE_TOOLCHAIN_FILE}")
+    message(WARNING "CMAKE_TOOLCHAIN_FILE '${CMAKE_TOOLCHAIN_FILE}' not found, ignoring.")
+    unset(CMAKE_TOOLCHAIN_FILE CACHE)
+endif()
+
 project(FloatTetwild)
 ################################################################################
 
