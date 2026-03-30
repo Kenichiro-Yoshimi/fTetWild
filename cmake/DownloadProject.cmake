@@ -160,8 +160,12 @@ function(download_project)
     # has this set to something not findable on the PATH.
     configure_file("${_DownloadProjectDir}/DownloadProject.CMakeLists.cmake.in"
                    "${DL_ARGS_DOWNLOAD_DIR}/CMakeLists.txt")
+    # Explicitly pass an empty CMAKE_TOOLCHAIN_FILE to prevent IDE integrations
+    # (e.g. Visual Studio vcpkg auto-inject) from propagating a stale or missing
+    # toolchain file into the download sub-project.
     execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}"
                         -D "CMAKE_MAKE_PROGRAM:FILE=${CMAKE_MAKE_PROGRAM}"
+                        -D "CMAKE_TOOLCHAIN_FILE="
                         .
                     RESULT_VARIABLE result
                     ${OUTPUT_QUIET}
