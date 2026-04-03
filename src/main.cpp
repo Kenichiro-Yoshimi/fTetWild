@@ -346,6 +346,7 @@ int main(int argc, char **argv) {
             input_bbox_mins = parser.bbox_mins;
             input_bbox_maxes = parser.bbox_maxes;
             target_edge_lengths = parser.target_edge_lengths;
+            params.bbox_transition_length = parser.transition_length;
             // simplification has been done already
             skip_simplify = true;
         } else

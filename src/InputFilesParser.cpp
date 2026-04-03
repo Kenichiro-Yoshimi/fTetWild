@@ -20,6 +20,9 @@ namespace floatTetWild {
         int index = 0;
         std::map<std::string, int> existings;
 
+        if (input_files_node["transition_length"].is_number())
+            transition_length = input_files_node["transition_length"];
+
         auto files = input_files_node["files"];
         for(const auto &file: files) {
             const std::string name = file["name"];

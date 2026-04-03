@@ -37,6 +37,7 @@ public:
     std::vector<Scalar>  target_edge_lengths;
     std::vector<Scalar>  eps_inputs;
     std::vector<bool>    skip_simplifies;
+    Scalar               transition_length = 0.0;
 
 private:
     void get_meshes_aux(const json &input_files_node, std::vector<std::string> &meshes);

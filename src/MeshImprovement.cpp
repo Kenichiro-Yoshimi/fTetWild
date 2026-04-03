@@ -240,13 +240,7 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
         if (v.is_removed)
           continue;
 
-        LocalBBox bbox;
-        if (mesh.params.get_local_bbox(v.pos, bbox)) {
-            v.sizing_scalar = bbox.sizing_scalar;
-        }
-        else {
-            v.sizing_scalar = 1;
-        }
+        v.sizing_scalar = mesh.params.get_sizing_scalar_at(v.pos);
     }
 
     const int maxIter = 10;
