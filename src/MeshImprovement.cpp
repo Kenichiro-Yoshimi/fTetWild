@@ -27,7 +27,7 @@
 #include <igl/Timer.h>
 #include <igl/winding_number.h>
 
-#define USE_FWN true
+//#define USE_FWN true
 
 void floatTetWild::init(Mesh &mesh, AABBWrapper& tree) {
     cout << "initializing..." << endl;
@@ -235,12 +235,23 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
 
     ////postprocessing
     cout << "//////////////// postprocessing ////////////////" << endl;
-    for (auto &v:mesh.tet_vertices) {
+    for (int i = 0; i < mesh.tet_vertices.size(); ++i) {
+        auto& v = mesh.tet_vertices[i];
         if (v.is_removed)
-            continue;
-        v.sizing_scalar = 1;
+          continue;
+
+        v.sizing_scalar = mesh.params.get_sizing_scalar_at(v.pos);
     }
-    operation(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree, std::array<int, 5>({{0, 1, 0, 0, 0}}));
+
+    const int maxIter = 10;
+    for (int i = 0; i < maxIter; ++i) {
+        operation(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree, std::array<int, 5>({ {1, 1, 1, 1, 0} }));
+
+        Scalar new_max_energy, new_avg_energy;
+        get_max_avg_energy(mesh, new_max_energy, new_avg_energy);
+        if(new_max_energy < 10)
+            break;
+    }
 }
 
 void floatTetWild::cleanup_empty_slots(Mesh &mesh, double percentage) {
@@ -500,6 +511,9 @@ void floatTetWild::operation(const std::vector<Vector3> &input_vertices, const s
 bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
 //    return false;
 
+    auto &tets = mesh.tets;
+    auto &tet_vertices = mesh.tet_vertices;
+
     cout << "updating sclaing field ..." << endl;
     bool is_hit_min_edge_length = false;
 
@@ -522,20 +536,20 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
 
     cout << "filter_energy = " << filter_energy << endl;
     Scalar recover = 1.5;
-    std::vector<Scalar> scale_multipliers(mesh.tet_vertices.size(), recover);
+    std::vector<Scalar> scale_multipliers(tet_vertices.size(), recover);
     Scalar refine_scale = 0.5;
     Scalar min_refine_scale = mesh.params.min_edge_len_rel / mesh.params.ideal_edge_length_rel;
 
     const int N = -int(std::log2(min_refine_scale) - 1);
     std::vector<std::vector<int>> v_ids(N, std::vector<int>());
-    for (int i = 0; i < mesh.tet_vertices.size(); i++) {
-        auto &v = mesh.tet_vertices[i];
+    for (int i = 0; i < tet_vertices.size(); i++) {
+        auto &v = tet_vertices[i];
         if (v.is_removed)
             continue;
 
         bool is_refine = false;
         for (int t_id: v.conn_tets) {
-            if (mesh.tets[t_id].quality > filter_energy)
+            if (tets[t_id].quality > filter_energy)
                 is_refine = true;
         }
         if (!is_refine)
@@ -559,9 +573,9 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
         std::vector<double> pts;//geogram needs double []
         pts.reserve(v_ids[n].size() * 3);
         for (int i = 0; i < v_ids[n].size(); i++) {
-            pts.push_back(mesh.tet_vertices[v_ids[n][i]].pos[0]);
-            pts.push_back(mesh.tet_vertices[v_ids[n][i]].pos[1]);
-            pts.push_back(mesh.tet_vertices[v_ids[n][i]].pos[2]);
+            pts.push_back(tet_vertices[v_ids[n][i]].pos[0]);
+            pts.push_back(tet_vertices[v_ids[n][i]].pos[1]);
+            pts.push_back(tet_vertices[v_ids[n][i]].pos[2]);
 
             v_queue.push(v_ids[n][i]);
             is_visited.insert(v_ids[n][i]);
@@ -575,33 +589,33 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
             int v_id = v_queue.front();
             v_queue.pop();
 
-            for (int t_id:mesh.tet_vertices[v_id].conn_tets) {
+            for (int t_id:tet_vertices[v_id].conn_tets) {
                 for (int j = 0; j < 4; j++) {
-                    if (is_visited.find(mesh.tets[t_id][j]) != is_visited.end())
+                    if (is_visited.find(tets[t_id][j]) != is_visited.end())
                         continue;
                     GEO::index_t _;
                     double sq_dist;
-                    const double p[3] = {mesh.tet_vertices[mesh.tets[t_id][j]].pos[0],
-                                         mesh.tet_vertices[mesh.tets[t_id][j]].pos[1],
-                                         mesh.tet_vertices[mesh.tets[t_id][j]].pos[2]};
+                    const double p[3] = {tet_vertices[tets[t_id][j]].pos[0],
+                                         tet_vertices[tets[t_id][j]].pos[1],
+                                         tet_vertices[tets[t_id][j]].pos[2]};
                     nnsearch->get_nearest_neighbors(1, p, &_, &sq_dist);
                     Scalar dis = sqrt(sq_dist);
 
                     if (dis < radius) {
-                        v_queue.push(mesh.tets[t_id][j]);
+                        v_queue.push(tets[t_id][j]);
                         Scalar new_ss = (dis / radius) * (1 - refine_scale) + refine_scale;
-                        if (new_ss < scale_multipliers[mesh.tets[t_id][j]])
-                            scale_multipliers[mesh.tets[t_id][j]] = new_ss;
+                        if (new_ss < scale_multipliers[tets[t_id][j]])
+                            scale_multipliers[tets[t_id][j]] = new_ss;
                     }
-                    is_visited.insert(mesh.tets[t_id][j]);
+                    is_visited.insert(tets[t_id][j]);
                 }
             }
         }
     }
 
     // update scalars
-    for (int i=0;i< mesh.tet_vertices.size();i++) {
-        auto& v = mesh.tet_vertices[i];
+    for (int i=0;i< tet_vertices.size();i++) {
+        auto& v = tet_vertices[i];
         if (v.is_removed)
             continue;
         Scalar new_scale = v.sizing_scalar * scale_multipliers[i];
@@ -1228,11 +1242,10 @@ void floatTetWild::boolean_operation(Mesh& mesh, const json &csg_tree_with_ids){
     for(int i = 0; i <= max_id; ++i){
         get_tracked_surface(mesh, vs, fs, i);
 
-#if USE_FWN
+    if(!mesh.params.use_general_wn)
         floatTetWild::fast_winding_number(Eigen::MatrixXd(vs.cast<double>()), Eigen::MatrixXi(fs), C, w[i]);
-#else
+    else
         igl::winding_number(Eigen::MatrixXd(vs.cast<double>()), Eigen::MatrixXi(fs), C, w[i]);
-#endif
     }
 
     int cnt = 0;
@@ -1275,13 +1288,13 @@ void floatTetWild::boolean_operation(Mesh& mesh, int op){
     }
 
     Eigen::VectorXd w1, w2;
-#if USE_FWN
-    floatTetWild::fast_winding_number(Eigen::MatrixXd(v1.cast<double>()), Eigen::MatrixXi(f1), C, w1);
-    floatTetWild::fast_winding_number(Eigen::MatrixXd(v2.cast<double>()), Eigen::MatrixXi(f2), C, w2);
-#else
-    igl::winding_number(Eigen::MatrixXd(v1.cast<double>()), Eigen::MatrixXi(f1), C, w1);
-    igl::winding_number(Eigen::MatrixXd(v2.cast<double>()), Eigen::MatrixXi(f2), C, w2);
-#endif
+    if(!mesh.params.use_general_wn) {
+        floatTetWild::fast_winding_number(Eigen::MatrixXd(v1.cast<double>()), Eigen::MatrixXi(f1), C, w1);
+        floatTetWild::fast_winding_number(Eigen::MatrixXd(v2.cast<double>()), Eigen::MatrixXi(f2), C, w2);
+    }else {
+        igl::winding_number(Eigen::MatrixXd(v1.cast<double>()), Eigen::MatrixXi(f1), C, w1);
+        igl::winding_number(Eigen::MatrixXd(v2.cast<double>()), Eigen::MatrixXi(f2), C, w2);
+    }
 
 
     int cnt = 0;
@@ -1326,17 +1339,17 @@ void floatTetWild::filter_outside(Mesh& mesh, bool invert_faces) {
     Eigen::Matrix<Scalar, Eigen::Dynamic, 3> V;
     Eigen::Matrix<int, Eigen::Dynamic, 3> F;
     get_tracked_surface(mesh, V, F);
+    MeshIO::write_surface_mesh(mesh.params.output_path + "_" + mesh.params.postfix + "_sf.stl", mesh, false);
     Eigen::VectorXd W;
     if (invert_faces) {
         Eigen::Matrix<int, Eigen::Dynamic, 1> tmp = F.col(1);
         F.col(1) = F.col(2).eval();
         F.col(2) = tmp;
     }
-#if USE_FWN
-    floatTetWild::fast_winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
-#else
-    igl::winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
-#endif
+    if(!mesh.params.use_general_wn)
+        floatTetWild::fast_winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
+    else
+        igl::winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
 
     index = 0;
     int n_tets = 0;
@@ -1447,11 +1460,10 @@ void floatTetWild::mark_outside(Mesh& mesh, bool invert_faces){
         F.col(2) = tmp;
     }
     Eigen::VectorXd W;
-#if USE_FWN
-    floatTetWild::fast_winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
-#else
-    igl::winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
-#endif
+    if(!mesh.params.use_general_wn)
+        floatTetWild::fast_winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
+    else
+        igl::winding_number(Eigen::MatrixXd(V.cast<double>()), Eigen::MatrixXi(F), C, W);
 
     index = 0;
     int n_tets = 0;

@@ -11,12 +11,41 @@
 // To set the parameters related
 #include <floattetwild/Types.hpp>
 
+#include <algorithm>
 #include <array>
 #include <vector>
 
 #include <geogram/mesh/mesh.h>
 
 namespace floatTetWild {
+
+class LocalBBox
+{
+public:
+    LocalBBox(const Vector3& input_bbox_min, const Vector3& input_bbox_max, const Scalar target_edge_length,
+              const Scalar ideal_edge_length) :
+        bbox_min(input_bbox_min),
+        bbox_max(input_bbox_max),
+        target_edge_length(target_edge_length),
+        sizing_scalar(1.0) {
+
+        if (target_edge_length > 0.0) {
+            sizing_scalar = target_edge_length / ideal_edge_length;
+        }
+    }
+
+    LocalBBox() {}
+
+    bool operator<(const LocalBBox &another) const {
+        return target_edge_length < another.target_edge_length;
+    };
+
+    Vector3 bbox_min;
+    Vector3 bbox_max;
+    Scalar  target_edge_length;
+    Scalar  sizing_scalar;
+};
+
 class Parameters
 {
   public:
@@ -63,7 +92,7 @@ class Parameters
     Scalar  bbox_diag_length;
     Scalar  ideal_edge_length;
     Scalar  ideal_edge_length_2;
-    Scalar  eps_input;
+    Scalar  eps_input = -1;
     Scalar  eps;
     Scalar  eps_delta;
     Scalar  eps_2;
@@ -81,6 +110,95 @@ class Parameters
     Scalar eps_2_simplification;
     Scalar dd_simplification;
 
+    bool use_general_wn = false;
+
+    // Transition zone width for smooth sizing_scalar blending at bbox boundaries.
+    // 0 means auto (3x the coarsest local target_edge_length).
+    Scalar bbox_transition_length = 0.0;
+
+    std::vector<LocalBBox> local_bboxes;
+
+    void set_local_bboxes(std::vector<Vector3> &bbox_mins, std::vector<Vector3> &bbox_maxes,
+                          std::vector<Scalar> &target_edge_lengths, Scalar ideal_edge_length)
+    {
+        for (int b_id = 0; b_id < target_edge_lengths.size(); ++b_id) {
+            LocalBBox bbox(bbox_mins[b_id], bbox_maxes[b_id], target_edge_lengths[b_id], ideal_edge_length);
+
+            local_bboxes.push_back(bbox);
+        }
+    }
+
+    bool get_local_bbox(const Vector3 &pt, LocalBBox& lbbox)
+    {
+        for (auto &bbox: local_bboxes) {
+            if (bbox.bbox_min[0] <= pt[0] && pt[0] <= bbox.bbox_max[0] &&
+                bbox.bbox_min[1] <= pt[1] && pt[1] <= bbox.bbox_max[1] &&
+                bbox.bbox_min[2] <= pt[2] && pt[2] <= bbox.bbox_max[2]) {
+
+                lbbox = bbox;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Returns a smoothly blended sizing_scalar at pt.
+    //
+    // Bboxes are processed from coarsest to finest (reverse of sorted order).
+    // At each step the current 'result' acts as the background reference for the
+    // next finer bbox, so the transition blends between adjacent sizing levels
+    // rather than jumping all the way to the global default (1.0).
+    //
+    // Example (TKA): femur bbox (coarse) processed first sets result=0.15, then
+    // implant bbox (fine) blends from 0.075 → 0.15 over the transition zone,
+    // giving a physically correct multi-level gradient.
+    Scalar get_sizing_scalar_at(const Vector3 &pt) const
+    {
+        if (local_bboxes.empty()) return 1.0;
+
+        // Determine transition zone width
+        Scalar trans = bbox_transition_length;
+        if (trans <= 0.0) {
+            // Auto: 5x the coarsest local target_edge_length
+            if (local_bboxes.back().target_edge_length > 0.0)
+                trans = local_bboxes.back().target_edge_length * 5.0;
+            else
+                trans = ideal_edge_length * 5.0;
+        }
+
+        // Process coarsest → finest so each finer bbox blends against the
+        // already-established coarser background, not the global default.
+        Scalar result = 1.0; // global default
+
+        for (int i = (int)local_bboxes.size() - 1; i >= 0; --i) {
+            const auto &bbox = local_bboxes[i];
+
+            // Signed distance to bbox boundary: positive = inside, negative = outside.
+            Scalar dx = std::min(pt[0] - bbox.bbox_min[0], bbox.bbox_max[0] - pt[0]);
+            Scalar dy = std::min(pt[1] - bbox.bbox_min[1], bbox.bbox_max[1] - pt[1]);
+            Scalar dz = std::min(pt[2] - bbox.bbox_min[2], bbox.bbox_max[2] - pt[2]);
+            Scalar d  = std::min(dx, std::min(dy, dz));
+
+            Scalar w;
+            if (d >= 0.0) {
+                w = 1.0;
+            } else if (d > -trans) {
+                // Smooth ramp: 0 at d=-trans, 1 at d=0
+                Scalar t = (d + trans) / trans;
+                w = t * t * (3.0 - 2.0 * t); // smooth step
+            } else {
+                continue; // outside transition zone: no contribution
+            }
+
+            // Blend between this bbox's sizing and the current background (result).
+            // Using result as reference correctly handles nested/overlapping bboxes.
+            Scalar candidate = w * bbox.sizing_scalar + (1.0 - w) * result;
+            result = std::min(result, candidate);
+        }
+
+        return result;
+    }
+
     bool init(Scalar bbox_diag_l)
     {
         if(stage > 5)
@@ -91,9 +209,13 @@ class Parameters
         ideal_edge_length   = bbox_diag_length * ideal_edge_length_rel;
         ideal_edge_length_2 = ideal_edge_length * ideal_edge_length;
 
-        eps_input = bbox_diag_length * eps_rel;
-        dd        = eps_input;// / stage;
-	dd /= 1.5;
+        if(eps_input < 0)
+          eps_input = bbox_diag_length * eps_rel;
+        else
+          eps_rel = eps_input / bbox_diag_length;
+
+        dd  = eps_input;// / stage;
+        dd /= 1.5;
         double eps_usable = eps_input - dd / std::sqrt(3);
         eps_delta = eps_usable * 0.1;
         eps = eps_usable - eps_delta * (stage - 1);
