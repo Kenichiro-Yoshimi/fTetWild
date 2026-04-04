@@ -235,12 +235,16 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
 
     ////postprocessing
     cout << "//////////////// postprocessing ////////////////" << endl;
-    for (int i = 0; i < mesh.tet_vertices.size(); ++i) {
-        auto& v = mesh.tet_vertices[i];
-        if (v.is_removed)
-          continue;
+    if (!mesh.params.surface_sizing_data.empty()) {
+        compute_surface_based_sizing(mesh);
+    } else {
+        for (int i = 0; i < mesh.tet_vertices.size(); ++i) {
+            auto& v = mesh.tet_vertices[i];
+            if (v.is_removed)
+              continue;
 
-        v.sizing_scalar = mesh.params.get_sizing_scalar_at(v.pos);
+            v.sizing_scalar = mesh.params.get_sizing_scalar_at(v.pos);
+        }
     }
 
     const int maxIter = 10;
@@ -632,6 +636,113 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
 
     cout << "is_hit_min_edge_length = " << is_hit_min_edge_length << endl;
     return is_hit_min_edge_length;
+}
+
+void floatTetWild::compute_surface_based_sizing(Mesh &mesh) {
+    auto &params = mesh.params;
+    auto &surfaces = params.surface_sizing_data;
+
+    if (surfaces.empty()) return;
+
+    Scalar trans = params.bbox_transition_length;
+    if (trans <= 0.0) {
+        Scalar max_tel = 0;
+        for (auto &s : surfaces)
+            if (s.target_edge_length > max_tel) max_tel = s.target_edge_length;
+        trans = (max_tel > 0) ? max_tel * 5.0 : params.ideal_edge_length * 5.0;
+    }
+
+    // Initialize all sizing_scalars to 1.0
+    for (auto &v : mesh.tet_vertices) {
+        if (!v.is_removed) v.sizing_scalar = 1.0;
+    }
+
+    // Process surfaces from coarsest to finest so each finer surface
+    // blends against the already-established coarser background.
+    for (int si = (int)surfaces.size() - 1; si >= 0; --si) {
+        auto &surf = surfaces[si];
+
+        // Collect candidate vertices within bbox + transition zone
+        std::vector<int> candidate_ids;
+        for (int i = 0; i < (int)mesh.tet_vertices.size(); ++i) {
+            auto &v = mesh.tet_vertices[i];
+            if (v.is_removed) continue;
+
+            auto &p = v.pos;
+            if (p[0] < surf.bbox_min[0] - trans || p[0] > surf.bbox_max[0] + trans ||
+                p[1] < surf.bbox_min[1] - trans || p[1] > surf.bbox_max[1] + trans ||
+                p[2] < surf.bbox_min[2] - trans || p[2] > surf.bbox_max[2] + trans)
+                continue;
+
+            candidate_ids.push_back(i);
+        }
+
+        if (candidate_ids.empty()) continue;
+
+        // Build query points matrix
+        Eigen::MatrixXd P(candidate_ids.size(), 3);
+        for (int j = 0; j < (int)candidate_ids.size(); ++j) {
+            auto &pos = mesh.tet_vertices[candidate_ids[j]].pos;
+            P(j, 0) = pos[0]; P(j, 1) = pos[1]; P(j, 2) = pos[2];
+        }
+
+        // Convert surface V/F to Eigen matrices for winding number
+        Eigen::MatrixXd V_eigen(surf.V.size(), 3);
+        for (int k = 0; k < (int)surf.V.size(); ++k) {
+            V_eigen(k, 0) = surf.V[k][0];
+            V_eigen(k, 1) = surf.V[k][1];
+            V_eigen(k, 2) = surf.V[k][2];
+        }
+        Eigen::MatrixXi F_eigen(surf.F.size(), 3);
+        for (int k = 0; k < (int)surf.F.size(); ++k) {
+            F_eigen(k, 0) = surf.F[k][0];
+            F_eigen(k, 1) = surf.F[k][1];
+            F_eigen(k, 2) = surf.F[k][2];
+        }
+
+        // Batch compute winding numbers
+        Eigen::VectorXd W;
+        floatTetWild::fast_winding_number(V_eigen, F_eigen, P, W);
+
+        // Build temporary GEO::Mesh and AABB tree for distance queries
+        GEO::Mesh geo_mesh;
+        std::vector<int> dummy_tags;
+        MeshIO::load_mesh(surf.V, surf.F, geo_mesh, dummy_tags);
+        MeshFacetsAABBWithEps aabb_tree(geo_mesh);
+
+        // Assign sizing_scalars with smooth transition
+        for (int j = 0; j < (int)candidate_ids.size(); ++j) {
+            int vid = candidate_ids[j];
+            auto &v = mesh.tet_vertices[vid];
+
+            bool inside = W(j) > 0.5;
+
+            // Compute distance to surface using AABB tree
+            GEO::vec3 geo_p(v.pos[0], v.pos[1], v.pos[2]);
+            GEO::vec3 nearest_p;
+            double sq_dist = std::numeric_limits<double>::max();
+            aabb_tree.nearest_facet(geo_p, nearest_p, sq_dist);
+
+            Scalar dist = std::sqrt(sq_dist);
+            Scalar d = inside ? dist : -dist; // signed distance
+
+            Scalar w;
+            if (d >= 0.0)
+                w = 1.0;
+            else if (d > -trans) {
+                Scalar t = (d + trans) / trans;
+                w = t * t * (3.0 - 2.0 * t); // smooth step
+            } else
+                continue;
+
+            // Blend against current background (v.sizing_scalar)
+            Scalar candidate = w * surf.sizing_scalar + (1.0 - w) * v.sizing_scalar;
+            v.sizing_scalar = std::min(v.sizing_scalar, candidate);
+        }
+
+        cout << "Surface sizing [" << si << "]: " << candidate_ids.size()
+             << " vertices processed (sizing_scalar=" << surf.sizing_scalar << ")" << endl;
+    }
 }
 
 void floatTetWild::output_info(Mesh& mesh, const AABBWrapper& tree) {

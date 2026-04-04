@@ -218,6 +218,11 @@ int main(int argc, char **argv) {
     bool use_floodfill = false;
     command_line.add_flag("--use-floodfill", use_floodfill, "Use flood-fill to extract interior volume.");
     command_line.add_flag("--use-general-wn", params.use_general_wn, "Use general winding number.");
+    command_line.add_flag("--octree", params.use_octree, "Use octree-based adaptive background grid.");
+    command_line.add_option("--octree-max-depth", params.octree_max_depth,
+                            "Maximum octree depth (0 = auto). Default: 0");
+    command_line.add_option("--octree-max-cell-size", params.octree_max_cell_size,
+                            "Far-field grid spacing for octree (0 = auto). Default: 0");
 
 
 #ifdef LIBIGL_WITH_TETGEN
@@ -347,6 +352,11 @@ int main(int argc, char **argv) {
             input_bbox_maxes = parser.bbox_maxes;
             target_edge_lengths = parser.target_edge_lengths;
             params.bbox_transition_length = parser.transition_length;
+            if (parser.max_cell_size > 0.0)
+                params.octree_max_cell_size = parser.max_cell_size;
+            // Store per-surface geometry for surface-based sizing (moved from parser)
+            params.surface_sizing_Vs = std::move(parser.input_Vs);
+            params.surface_sizing_Fs = std::move(parser.input_Fs);
             // simplification has been done already
             skip_simplify = true;
         } else
@@ -373,7 +383,14 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    params.set_local_bboxes(input_bbox_mins, input_bbox_maxes, 
+    if (!params.surface_sizing_Vs.empty()) {
+        // Surface-based sizing: use actual geometry for inside/outside test
+        params.set_surface_sizing_data(params.surface_sizing_Vs, params.surface_sizing_Fs,
+                                       input_bbox_mins, input_bbox_maxes,
+                                       target_edge_lengths, params.ideal_edge_length);
+    }
+    // Always set bbox-based data (used as fallback for get_sizing_scalar_at)
+    params.set_local_bboxes(input_bbox_mins, input_bbox_maxes,
                             target_edge_lengths, params.ideal_edge_length);
     std::sort(params.local_bboxes.begin(), params.local_bboxes.end());
 

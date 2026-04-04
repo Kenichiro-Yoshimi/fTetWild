@@ -19,6 +19,21 @@
 
 namespace floatTetWild {
 
+class SurfaceSizingData
+{
+public:
+    std::vector<Vector3>  V;
+    std::vector<Vector3i> F;
+    Vector3 bbox_min;
+    Vector3 bbox_max;
+    Scalar  target_edge_length;
+    Scalar  sizing_scalar;
+
+    bool operator<(const SurfaceSizingData &another) const {
+        return target_edge_length < another.target_edge_length;
+    };
+};
+
 class LocalBBox
 {
 public:
@@ -112,11 +127,23 @@ class Parameters
 
     bool use_general_wn = false;
 
+    // Octree background grid: use adaptive octree instead of uniform grid
+    bool use_octree = false;
+    // Maximum octree depth (0 = auto)
+    int octree_max_depth = 0;
+    // Far-field grid spacing for octree (0 = auto, uses bbox_diag * box_scale)
+    Scalar octree_max_cell_size = 0.0;
+
     // Transition zone width for smooth sizing_scalar blending at bbox boundaries.
     // 0 means auto (3x the coarsest local target_edge_length).
     Scalar bbox_transition_length = 0.0;
 
     std::vector<LocalBBox> local_bboxes;
+    std::vector<SurfaceSizingData> surface_sizing_data;
+
+    // Temporary storage for per-surface V/F (moved from InputFilesParser)
+    std::vector<std::vector<Vector3>>  surface_sizing_Vs;
+    std::vector<std::vector<Vector3i>> surface_sizing_Fs;
 
     void set_local_bboxes(std::vector<Vector3> &bbox_mins, std::vector<Vector3> &bbox_maxes,
                           std::vector<Scalar> &target_edge_lengths, Scalar ideal_edge_length)
@@ -126,6 +153,28 @@ class Parameters
 
             local_bboxes.push_back(bbox);
         }
+    }
+
+    void set_surface_sizing_data(
+        std::vector<std::vector<Vector3>> &Vs,
+        std::vector<std::vector<Vector3i>> &Fs,
+        std::vector<Vector3> &bbox_mins, std::vector<Vector3> &bbox_maxes,
+        std::vector<Scalar> &target_edge_lengths, Scalar ideal_edge_length)
+    {
+        surface_sizing_data.clear();
+        for (int i = 0; i < (int)Vs.size(); ++i) {
+            SurfaceSizingData data;
+            data.V = Vs[i];
+            data.F = Fs[i];
+            data.bbox_min = bbox_mins[i];
+            data.bbox_max = bbox_maxes[i];
+            data.target_edge_length = target_edge_lengths[i];
+            data.sizing_scalar = 1.0;
+            if (target_edge_lengths[i] > 0.0)
+                data.sizing_scalar = target_edge_lengths[i] / ideal_edge_length;
+            surface_sizing_data.push_back(std::move(data));
+        }
+        std::sort(surface_sizing_data.begin(), surface_sizing_data.end());
     }
 
     bool get_local_bbox(const Vector3 &pt, LocalBBox& lbbox)
@@ -154,7 +203,15 @@ class Parameters
     // giving a physically correct multi-level gradient.
     Scalar get_sizing_scalar_at(const Vector3 &pt) const
     {
-        if (local_bboxes.empty()) return 1.0;
+        // Far-field default: if max_cell_size is set, use it to keep
+        // coarse elements in far-field (preserves octree grading).
+        // Otherwise, use 1.0 (= ideal_edge_length).
+        Scalar far_field_scalar = 1.0;
+        if (octree_max_cell_size > 0.0 && ideal_edge_length > 0.0) {
+            far_field_scalar = octree_max_cell_size / ideal_edge_length;
+        }
+
+        if (local_bboxes.empty()) return far_field_scalar;
 
         // Determine transition zone width
         Scalar trans = bbox_transition_length;
@@ -168,7 +225,7 @@ class Parameters
 
         // Process coarsest → finest so each finer bbox blends against the
         // already-established coarser background, not the global default.
-        Scalar result = 1.0; // global default
+        Scalar result = far_field_scalar;
 
         for (int i = (int)local_bboxes.size() - 1; i >= 0; --i) {
             const auto &bbox = local_bboxes[i];

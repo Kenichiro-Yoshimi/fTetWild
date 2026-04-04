@@ -23,6 +23,12 @@ namespace floatTetWild {
         if (input_files_node["transition_length"].is_number())
             transition_length = input_files_node["transition_length"];
 
+        if (input_files_node["use_surface_sizing"].is_boolean())
+            use_surface_sizing = input_files_node["use_surface_sizing"];
+
+        if (input_files_node["max_cell_size"].is_number())
+            max_cell_size = input_files_node["max_cell_size"];
+
         auto files = input_files_node["files"];
         for(const auto &file: files) {
             const std::string name = file["name"];
@@ -46,6 +52,16 @@ namespace floatTetWild {
                 skip_simplifies.push_back(skip_simplify);
 
                 existings[name] = index++;
+            }
+        }
+
+        // Auto-enable surface sizing if any target_edge_length is specified
+        if (!use_surface_sizing) {
+            for (const auto &tel : target_edge_lengths) {
+                if (tel > 0) {
+                    use_surface_sizing = true;
+                    break;
+                }
             }
         }
     }
@@ -92,6 +108,12 @@ namespace floatTetWild {
             tree.get_bbox(bbox_min, bbox_max);
             bbox_mins.push_back(bbox_min);
             bbox_maxes.push_back(bbox_max);
+        }
+
+        // Store per-mesh geometry for surface-based sizing field
+        if (use_surface_sizing) {
+            input_Vs = Vs;
+            input_Fs = Fs;
         }
 
         merge(Vs, Fs, V, F, sf_mesh, tags);

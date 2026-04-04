@@ -38,6 +38,12 @@ public:
     std::vector<Scalar>  eps_inputs;
     std::vector<bool>    skip_simplifies;
     Scalar               transition_length = 0.0;
+    bool                 use_surface_sizing = false;
+    Scalar               max_cell_size = 0.0;  // Far-field grid spacing for octree (0 = auto)
+
+    // Per-input-mesh geometry (for surface-based sizing field)
+    std::vector<std::vector<Vector3>>  input_Vs;
+    std::vector<std::vector<Vector3i>> input_Fs;
 
 private:
     void get_meshes_aux(const json &input_files_node, std::vector<std::string> &meshes);

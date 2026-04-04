@@ -21,6 +21,7 @@ namespace floatTetWild {
     void operation(const std::vector<Vector3> &input_vertices, const std::vector<Vector3i> &input_faces, const std::vector<int> &input_tags, std::vector<bool> &is_face_inserted,
             Mesh &mesh, AABBWrapper& tree, const std::array<int, 5> &ops = {{1, 1, 1, 1, 1}});
     bool update_scaling_field(Mesh &mesh, Scalar max_energy);
+    void compute_surface_based_sizing(Mesh &mesh);
 
     int get_max_p(const Mesh &mesh);
 

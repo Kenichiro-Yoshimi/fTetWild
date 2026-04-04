@@ -15,6 +15,7 @@
 #include <iterator>
 #include <algorithm>
 #include <bitset>
+#include <cmath>
 
 #include <floattetwild/Predicates.hpp>
 
@@ -155,6 +156,328 @@ namespace floatTetWild {
                 }
             }
         }
+
+        // =====================================================================
+        // Octree-based adaptive background grid
+        // =====================================================================
+
+        struct OctreeNode {
+            Vector3 center;
+            Scalar half_size;   // half-length of the cube side
+            int depth;
+            int children[8];    // -1 = no child (leaf)
+            bool is_leaf;
+
+            OctreeNode() : depth(0), is_leaf(true) {
+                for (int i = 0; i < 8; i++) children[i] = -1;
+            }
+        };
+
+        // Child index from octant: bit 0 = x, bit 1 = y, bit 2 = z
+        inline Vector3 child_center(const Vector3 &parent_center, Scalar parent_half, int child_idx) {
+            Scalar quarter = parent_half * 0.5;
+            return Vector3(
+                parent_center[0] + ((child_idx & 1) ? quarter : -quarter),
+                parent_center[1] + ((child_idx & 2) ? quarter : -quarter),
+                parent_center[2] + ((child_idx & 4) ? quarter : -quarter)
+            );
+        }
+
+        // Refine a leaf node into 8 children
+        void refine_node(std::vector<OctreeNode> &nodes, int node_id) {
+            Vector3 center = nodes[node_id].center;
+            Scalar half = nodes[node_id].half_size;
+            int depth = nodes[node_id].depth;
+
+            nodes[node_id].is_leaf = false;
+            Scalar child_half = half * 0.5;
+
+            for (int c = 0; c < 8; c++) {
+                int child_id = (int)nodes.size();
+                nodes[node_id].children[c] = child_id;
+
+                OctreeNode child;
+                child.center = child_center(center, half, c);
+                child.half_size = child_half;
+                child.depth = depth + 1;
+                child.is_leaf = true;
+                nodes.push_back(child);
+            }
+        }
+
+        // Check if cell should be refined: the cell is near the surface
+        // and larger than the target grid spacing.
+        //
+        // The octree's purpose is to redistribute background grid points:
+        //   - Near surfaces: same density as the uniform grid (grid_spacing)
+        //   - Far from surfaces: coarser (saves initial element count)
+        // The mesh improvement step handles final sizing via target_edge_length.
+        bool should_refine_cell(const OctreeNode &node, const AABBWrapper &tree,
+                                Scalar grid_spacing, int max_depth) {
+            if (node.depth >= max_depth)
+                return false;
+
+            Scalar cell_size = node.half_size * 2.0;
+
+            // Don't refine if cell is already at or below grid spacing
+            if (cell_size <= grid_spacing)
+                return false;
+
+            // Refinement distance: refine cells whose interior or vicinity
+            // intersects the surface. Use cell diagonal + grid_spacing as buffer.
+            Scalar refine_dist = cell_size * std::sqrt(3.0) + grid_spacing;
+            Scalar refine_dist_sq = refine_dist * refine_dist;
+
+            // Check center
+            if (tree.get_sq_dist_to_sf(node.center) < refine_dist_sq)
+                return true;
+
+            // Check 8 corners
+            for (int i = 0; i < 8; i++) {
+                Vector3 corner(
+                    node.center[0] + ((i & 1) ? node.half_size : -node.half_size),
+                    node.center[1] + ((i & 2) ? node.half_size : -node.half_size),
+                    node.center[2] + ((i & 4) ? node.half_size : -node.half_size)
+                );
+                if (tree.get_sq_dist_to_sf(corner) < refine_dist_sq)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // Check if a cell overlaps with the bounding box
+        bool cell_overlaps_bbox(const OctreeNode &node,
+                                const Vector3 &bbox_min, const Vector3 &bbox_max) {
+            Vector3 cell_min = node.center - Vector3(node.half_size, node.half_size, node.half_size);
+            Vector3 cell_max = node.center + Vector3(node.half_size, node.half_size, node.half_size);
+            for (int d = 0; d < 3; d++) {
+                if (cell_min[d] > bbox_max[d] || cell_max[d] < bbox_min[d])
+                    return false;
+            }
+            return true;
+        }
+
+        void build_octree(std::vector<OctreeNode> &nodes, const AABBWrapper &tree,
+                          Scalar grid_spacing, int max_depth,
+                          const Vector3 &bbox_min, const Vector3 &bbox_max) {
+            // Process nodes level by level (BFS-like, but we just iterate since
+            // new nodes are appended at the end)
+            size_t i = 0;
+            while (i < nodes.size()) {
+                if (nodes[i].is_leaf &&
+                    cell_overlaps_bbox(nodes[i], bbox_min, bbox_max) &&
+                    should_refine_cell(nodes[i], tree, grid_spacing, max_depth)) {
+                    refine_node(nodes, (int)i);
+                }
+                i++;
+            }
+        }
+
+        // Find the leaf node containing a given point by traversing the tree from root.
+        // Returns -1 if the point is outside the root cell.
+        int find_leaf(const std::vector<OctreeNode> &nodes, const Vector3 &pt) {
+            // Check if point is inside root
+            const auto &root = nodes[0];
+            for (int d = 0; d < 3; d++) {
+                if (pt[d] < root.center[d] - root.half_size - 1e-10 ||
+                    pt[d] > root.center[d] + root.half_size + 1e-10)
+                    return -1;
+            }
+
+            int node_id = 0;
+            while (!nodes[node_id].is_leaf) {
+                int child_idx = 0;
+                if (pt[0] > nodes[node_id].center[0]) child_idx |= 1;
+                if (pt[1] > nodes[node_id].center[1]) child_idx |= 2;
+                if (pt[2] > nodes[node_id].center[2]) child_idx |= 4;
+
+                int next = nodes[node_id].children[child_idx];
+                if (next < 0) return node_id; // shouldn't happen in a proper octree
+                node_id = next;
+            }
+            return node_id;
+        }
+
+        // 2:1 balance: ensure no leaf cell is more than 2x bigger than its neighbor.
+        // Uses tree-traversal for neighbor finding: O(n * depth) per iteration.
+        void balance_octree(std::vector<OctreeNode> &nodes, int max_depth) {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+
+                // Collect current leaves (indices may grow during iteration,
+                // so snapshot the current set)
+                std::vector<int> leaves;
+                for (int i = 0; i < (int)nodes.size(); i++) {
+                    if (nodes[i].is_leaf)
+                        leaves.push_back(i);
+                }
+
+                for (int idx : leaves) {
+                    if (!nodes[idx].is_leaf)
+                        continue;
+                    int my_depth = nodes[idx].depth;
+                    if (my_depth <= 0)
+                        continue;
+
+                    Scalar step = nodes[idx].half_size * 2.0;
+                    const Vector3 &my_center = nodes[idx].center;
+
+                    // Check 6 face-neighbors
+                    const Vector3 offsets[6] = {
+                        { step, 0, 0}, {-step, 0, 0},
+                        {0,  step, 0}, {0, -step, 0},
+                        {0, 0,  step}, {0, 0, -step}
+                    };
+
+                    for (int n = 0; n < 6; n++) {
+                        Vector3 neighbor_pt = my_center + offsets[n];
+                        int neighbor_id = find_leaf(nodes, neighbor_pt);
+                        if (neighbor_id < 0)
+                            continue; // outside root
+
+                        // If neighbor is more than 1 level coarser, refine it
+                        if (nodes[neighbor_id].is_leaf &&
+                            nodes[neighbor_id].depth < my_depth - 1 &&
+                            nodes[neighbor_id].depth < max_depth) {
+                            refine_node(nodes, neighbor_id);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Octree-guided adaptive grid point generation.
+        //
+        // Parameters (from inputs.json or CLI):
+        //   max_cell_size: far-field grid spacing (coarsest level)
+        //
+        // Strategy:
+        //   1. Generate a regular grid at bbox_diag * box_scale spacing
+        //      (same as compute_voxel_points)
+        //   2. Build an octree that identifies local cell sizes
+        //   3. For each grid point, query the octree to get local cell size
+        //   4. Skip points where stride > 1 and indices not aligned
+        //   5. Always keep bbox boundary points
+        //
+        // All kept points lie on the regular lattice → no Delaunay quality loss
+        void compute_octree_points(const Vector3 &min, const Vector3 &max,
+                                   const Parameters &params, const AABBWrapper &tree,
+                                   std::vector<Vector3> &voxels) {
+            const Vector3 diag = max - min;
+
+            // Finest grid spacing = same as uniform grid (bbox_diag * box_scale).
+            // This matches the original compute_voxel_points behavior exactly.
+            Scalar finest_spacing = params.bbox_diag_length * params.box_scale;
+
+            // Determine coarsest grid spacing (far-field resolution)
+            Scalar coarsest_spacing = params.octree_max_cell_size;
+            if (coarsest_spacing <= 0.0) {
+                coarsest_spacing = params.bbox_diag_length * params.box_scale;
+            }
+            coarsest_spacing = std::max(coarsest_spacing, finest_spacing);
+
+            Scalar grid_spacing = finest_spacing;
+
+            logger().info("Octree: finest_spacing={}, coarsest_spacing={} (ratio={})",
+                          finest_spacing, coarsest_spacing, coarsest_spacing / finest_spacing);
+
+            // Compute fine grid dimensions (for index alignment)
+            Vector3i n_voxels = (diag / grid_spacing).cast<int>();
+            for (int d = 0; d < 3; ++d)
+                n_voxels(d) = std::max(n_voxels(d), 1);
+            const Vector3 delta = diag.array() / n_voxels.array().cast<Scalar>();
+
+            // Build octree
+            Scalar max_side = std::max({diag[0], diag[1], diag[2]});
+            Vector3 center = (min + max) * 0.5;
+            Scalar root_half = max_side * 0.5;
+
+            int max_depth = params.octree_max_depth;
+            if (max_depth <= 0) {
+                max_depth = (int)std::ceil(std::log2(max_side / grid_spacing));
+                max_depth = std::max(max_depth, 2);
+                max_depth = std::min(max_depth, 10);
+            }
+
+            Scalar finest_cell = root_half * 2.0 / std::pow(2.0, max_depth);
+            logger().info("Octree: root_half={}, max_depth={}, grid_spacing={}, finest_cell={}",
+                          root_half, max_depth, grid_spacing, finest_cell);
+
+            std::vector<OctreeNode> nodes;
+            nodes.reserve(1024);
+
+            OctreeNode root_node;
+            root_node.center = center;
+            root_node.half_size = root_half;
+            root_node.depth = 0;
+            root_node.is_leaf = true;
+            nodes.push_back(root_node);
+
+            build_octree(nodes, tree, grid_spacing, max_depth, min, max);
+            logger().info("Octree after build: {} nodes", nodes.size());
+
+            balance_octree(nodes, max_depth);
+
+            int n_leaves = 0;
+            for (const auto &n : nodes)
+                if (n.is_leaf) n_leaves++;
+            logger().info("Octree after balance: {} nodes, {} leaves", nodes.size(), n_leaves);
+
+            // Generate grid points with octree-guided thinning (filter approach)
+            // Iterate over the full fine grid, skip far-field points based on
+            // octree cell size. Always keep bbox boundary points.
+            voxels.clear();
+            voxels.reserve((n_voxels(0) + 1) * (n_voxels(1) + 1) * (n_voxels(2) + 1));
+
+            const double sq_distg = 100 * params.eps_2;
+            int n_skipped = 0;
+
+            for (int i = 0; i <= n_voxels(0); ++i) {
+                const Scalar px = (i == n_voxels(0)) ? max(0) : (min(0) + delta(0) * i);
+                for (int j = 0; j <= n_voxels(1); ++j) {
+                    const Scalar py = (j == n_voxels(1)) ? max(1) : (min(1) + delta(1) * j);
+                    for (int k = 0; k <= n_voxels(2); ++k) {
+                        const Scalar pz = (k == n_voxels(2)) ? max(2) : (min(2) + delta(2) * k);
+
+                        // Check octree stride FIRST (cheap) before surface distance (expensive)
+                        Vector3 pt(px, py, pz);
+                        int leaf_id = find_leaf(nodes, pt);
+                        if (leaf_id >= 0 && nodes[leaf_id].is_leaf) {
+                            Scalar local_cell_size = nodes[leaf_id].half_size * 2.0;
+                            local_cell_size = std::min(local_cell_size, coarsest_spacing);
+                            int stride = std::max(1, (int)std::round(local_cell_size / grid_spacing));
+                            int stride_pow2 = 1;
+                            while (stride_pow2 * 2 <= stride)
+                                stride_pow2 *= 2;
+
+                            if (stride_pow2 > 1) {
+                                bool on_bbox_face = (i == 0 || i == n_voxels(0) ||
+                                                     j == 0 || j == n_voxels(1) ||
+                                                     k == 0 || k == n_voxels(2));
+                                if (!on_bbox_face &&
+                                    (i % stride_pow2 != 0 || j % stride_pow2 != 0 || k % stride_pow2 != 0)) {
+                                    n_skipped++;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Surface distance check (expensive) only for kept points
+                        if (tree.get_sq_dist_to_sf(pt) <= sq_distg)
+                            continue;
+
+                        voxels.emplace_back(px, py, pz);
+                    }
+                }
+            }
+
+            int uniform_total = (n_voxels(0) + 1) * (n_voxels(1) + 1) * (n_voxels(2) + 1);
+            logger().info("Octree grid: {} background points, {} skipped (uniform grid: {} total)",
+                          voxels.size(), n_skipped, uniform_total);
+        }
     }
 
 //#include <igl/unique_rows.h>
@@ -188,7 +511,11 @@ namespace floatTetWild {
 
 
         std::vector<Vector3> voxel_points;
-        compute_voxel_points(min, max, params, tree, voxel_points);
+        if (params.use_octree) {
+            compute_octree_points(min, max, params, tree, voxel_points);
+        } else {
+            compute_voxel_points(min, max, params, tree, voxel_points);
+        }
 
         const int n_pts = input_vertices.size() + boxpoints.size() + voxel_points.size();
         tet_vertices.resize(n_pts);
