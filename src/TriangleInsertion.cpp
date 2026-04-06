@@ -2270,15 +2270,16 @@ bool floatTetWild::insert_boundary_edges_get_intersecting_edges_and_points(
                                     + t2 * mesh.tet_vertices[f_v_ids[(k + 1) % 3]].pos;
                         double dis1 = (p - mesh.tet_vertices[f_v_ids[k]].pos).squaredNorm();
                         double dis2 = (p - mesh.tet_vertices[f_v_ids[(k + 1) % 3]].pos).squaredNorm();
-//                        if (dis1 < SCALAR_ZERO_2) {
-                        if (dis1 < mesh.params.eps_2_coplanar) {
+                        // Snap to the nearer endpoint if the intersection is within eps.
+                        // This prevents inserting a new vertex extremely close to an existing one,
+                        // which would create tetrahedra with extremely short surface edges.
+                        if (dis1 < mesh.params.eps_2) {
                             v_oris[f_v_ids[k]] = Predicates::ORI_ZERO;
                             is_intersected = true;
                             break;
                         }
-//                        if (dis2 < SCALAR_ZERO_2) {
-                        if (dis2 < mesh.params.eps_2_coplanar) {
-                            v_oris[f_v_ids[k]] = Predicates::ORI_ZERO;
+                        if (dis2 < mesh.params.eps_2) {
+                            v_oris[f_v_ids[(k + 1) % 3]] = Predicates::ORI_ZERO;
                             is_intersected = true;
                             break;
                         }

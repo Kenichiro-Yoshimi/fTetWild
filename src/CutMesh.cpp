@@ -617,18 +617,19 @@ bool floatTetWild::CutMesh::get_intersecting_edges_and_points(std::vector<Vector
             return false;
         }
 
-//        Scalar dist1 = (p-mesh.tet_vertices[v1_id].pos).squaredNorm();
-//        Scalar dist2 = (p-mesh.tet_vertices[v2_id].pos).squaredNorm();
-//        if(dist1 <= SCALAR_ZERO_2){
-//            cout<<"snapped e[0]"<<endl;
-//            is_snapped[e[0]] = true;
-//            continue;
-//        }
-//        if(dist2 <= SCALAR_ZERO_2){
-//            cout<<"snapped e[1]"<<endl;
-//            is_snapped[e[1]] = true;
-//            continue;
-//        }
+        // Snap to the nearer endpoint if the intersection is within eps.
+        // This prevents inserting a new vertex extremely close to an existing one,
+        // which would create tetrahedra with extremely short surface edges.
+        Scalar dist1_2 = (p - mesh.tet_vertices[v1_id].pos).squaredNorm();
+        Scalar dist2_2 = (p - mesh.tet_vertices[v2_id].pos).squaredNorm();
+        if (dist1_2 < mesh.params.eps_2) {
+            is_snapped[e[0]] = true;
+            continue;
+        }
+        if (dist2_2 < mesh.params.eps_2) {
+            is_snapped[e[1]] = true;
+            continue;
+        }
 
 //        timer.start();
         points.push_back(p);
