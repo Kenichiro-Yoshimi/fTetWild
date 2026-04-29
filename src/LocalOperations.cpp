@@ -138,52 +138,36 @@ void floatTetWild::set_opp_t_id(Mesh& mesh, int t_id, int j){
 }
 
 void floatTetWild::get_all_edges(const Mesh& mesh, std::vector<std::array<int, 2>>& edges){
-    edges.reserve(mesh.tets.size()*6);
+    // Enumerate unique edges by visiting each vertex and collecting edges
+    // to higher-indexed neighbors. Each edge (v_lo, v_hi) is emitted exactly once
+    // from vertex v_lo, avoiding duplicates without sort+unique.
+    auto &tet_vertices = mesh.tet_vertices;
+    auto &tets = mesh.tets;
 
-#ifdef FLOAT_TETWILD_USE_TBB
-    tbb::concurrent_vector<std::array<int, 2>> edges_tbb;
-    tbb::parallel_for( size_t(0), mesh.tets.size(), [&](size_t i)
-#else
-    for (unsigned int i = 0; i < mesh.tets.size(); i++)
-#endif
-        {
-        if (mesh.tets[i].is_removed){
-#ifdef FLOAT_TETWILD_USE_TBB
-            return;
-#else
+    // Estimate: ~3 edges per vertex on average
+    edges.reserve(tet_vertices.size() * 3);
+
+    for (int v_id = 0; v_id < (int)tet_vertices.size(); ++v_id) {
+        if (tet_vertices[v_id].is_removed)
             continue;
-#endif
-        }
-        for (int j = 0; j < 3; j++) {
-            std::array<int, 2> e = {{mesh.tets[i][0], mesh.tets[i][j + 1]}};
-            if (e[0] > e[1])
-                std::swap(e[0], e[1]);
-#ifdef FLOAT_TETWILD_USE_TBB
-            edges_tbb.push_back(e);
-#else
-            edges.push_back(e);
-#endif
-            e = {{mesh.tets[i][j + 1], mesh.tets[i][mod3(j + 1) + 1]}};
-            if (e[0] > e[1])
-                std::swap(e[0], e[1]);
-#ifdef FLOAT_TETWILD_USE_TBB
-            edges_tbb.push_back(e);
-#else
-            edges.push_back(e);
-#endif
-        }
-    }
-#ifdef FLOAT_TETWILD_USE_TBB
-    );
-    edges.reserve(edges_tbb.size());
-    edges.insert(edges.end(), edges_tbb.begin(), edges_tbb.end());
-    assert(edges_tbb.size() == edges.size());
-    tbb::parallel_sort(edges.begin(), edges.end());
 
-    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
-#else
-    vector_unique(edges);
-#endif
+        // Collect unique neighbors with higher index via conn_tets
+        // Use a local sorted vector for small neighbor sets (faster than unordered_set)
+        std::vector<int> hi_neighbors;
+        for (int t_id : tet_vertices[v_id].conn_tets) {
+            if (tets[t_id].is_removed) continue;
+            for (int j = 0; j < 4; ++j) {
+                int nb = tets[t_id][j];
+                if (nb > v_id)
+                    hi_neighbors.push_back(nb);
+            }
+        }
+        std::sort(hi_neighbors.begin(), hi_neighbors.end());
+        hi_neighbors.erase(std::unique(hi_neighbors.begin(), hi_neighbors.end()), hi_neighbors.end());
+
+        for (int nb : hi_neighbors)
+            edges.push_back({{v_id, nb}});
+    }
 }
 
 void floatTetWild::get_all_edges(const Mesh& mesh, const std::vector<int>& t_ids, std::vector<std::array<int, 2>>& edges, bool skip_freezed) {
