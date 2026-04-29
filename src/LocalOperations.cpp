@@ -401,6 +401,7 @@ void floatTetWild::get_max_avg_energy(const Mesh& mesh, Scalar& max_energy, Scal
     max_energy = 0;
     avg_energy = 0;
     int cnt = 0;
+
     for (auto &t: mesh.tets) {
         if (t.is_removed)
             continue;
@@ -409,17 +410,29 @@ void floatTetWild::get_max_avg_energy(const Mesh& mesh, Scalar& max_energy, Scal
         avg_energy += t.quality;
         cnt++;
     }
-    avg_energy /= cnt;
+
+    if (cnt > 0)
+        avg_energy /= cnt;
 }
 
 Scalar floatTetWild::get_mid_energy(const Mesh& mesh){
-    std::vector<Scalar > tmp;
+#ifdef FLOAT_TETWILD_USE_TBB
+    tbb::concurrent_vector<Scalar> tmp_tbb;
+    tbb::parallel_for(size_t(0), mesh.tets.size(), [&](size_t i) {
+        if (!mesh.tets[i].is_removed)
+            tmp_tbb.push_back(mesh.tets[i].quality);
+    });
+    std::vector<Scalar> tmp(tmp_tbb.begin(), tmp_tbb.end());
+    tbb::parallel_sort(tmp.begin(), tmp.end());
+#else
+    std::vector<Scalar> tmp;
     for (auto& t:mesh.tets) {
         if (t.is_removed)
             continue;
         tmp.push_back(t.quality);
     }
     std::sort(tmp.begin(), tmp.end());
+#endif
     return tmp[tmp.size() / 2];
 }
 

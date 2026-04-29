@@ -11,6 +11,10 @@
 
 #include <floattetwild/MeshImprovement.h>
 
+#ifdef FLOAT_TETWILD_USE_TBB
+#include <tbb/parallel_for.h>
+#endif
+
 #define TET_MODIFIED 100
 
 void floatTetWild::edge_splitting(Mesh& mesh, const AABBWrapper& tree) {
@@ -94,6 +98,15 @@ void floatTetWild::edge_splitting(Mesh& mesh, const AABBWrapper& tree) {
         }
     }
 
+#ifdef FLOAT_TETWILD_USE_TBB
+    tbb::parallel_for(size_t(0), tets.size(), [&](size_t i) {
+        auto &t = tets[i];
+        if (!t.is_removed && t.scalar == TET_MODIFIED) {
+            t.quality = get_quality(mesh, t);
+            t.scalar = 0;
+        }
+    });
+#else
     for(auto& t: tets){
         if(t.is_removed)
             continue;
@@ -102,6 +115,7 @@ void floatTetWild::edge_splitting(Mesh& mesh, const AABBWrapper& tree) {
             t.scalar = 0;
         }
     }
+#endif
 
     cout<<"success = "<<suc_counter<<"("<<counter<<")"<<endl;
 }
