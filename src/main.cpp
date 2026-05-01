@@ -474,8 +474,20 @@ int main(int argc, char **argv) {
                    mesh.get_max_energy(), mesh.get_avg_energy());
 
     timer.start();
-    correct_tracked_surface_orientation(mesh, tree);
-    logger().info("correct_tracked_surface_orientation done");
+    // For the multi-input (--inputs) path, the entire is_surface_fs-based
+    // tracked-surface plumbing (correct_tracked_surface_orientation +
+    // get_tracked_surface inside filter_outside + the merged-surface
+    // fast_winding_number + the _sf.stl write) is replaced by per-input
+    // winding-number tests. Compute the per-input data ONCE here (covers all
+    // currently-non-removed tets) and reuse it for both the inside/outside
+    // filter and the _tracked_surface.stl writer below.
+    floatTetWild::PerInputData per_input;
+    if (!inputs_file_name.empty()) {
+        per_input = compute_per_input_data(mesh);
+    } else {
+        correct_tracked_surface_orientation(mesh, tree);
+        logger().info("correct_tracked_surface_orientation done");
+    }
     if(!csg_file.empty())
         boolean_operation(mesh, tree_with_ids);
     else if(boolean_op >= 0)
@@ -491,11 +503,21 @@ int main(int argc, char **argv) {
             if(!disable_wn) {
                 if(use_floodfill) {
                     filter_outside_floodfill(mesh);
-                } else
+                } else if (!inputs_file_name.empty()) {
+                    filter_outside_per_input(mesh, per_input);
+                } else {
                     filter_outside(mesh);
+                }
             }
         }
     }
+    if (!inputs_file_name.empty()) {
+        output_tracked_surface_per_input(
+            mesh,
+            params.output_path + "_" + params.postfix + "_tracked_surface.stl",
+            per_input);
+    }
+
     if(params.manifold_surface){
         manifold_surface(mesh);
     }

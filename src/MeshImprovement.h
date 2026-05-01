@@ -32,6 +32,42 @@ namespace floatTetWild {
     void filter_outside(Mesh& mesh, bool invert_faces = false);
     void filter_outside_floodfill(Mesh& mesh, bool invert_faces = false);
     void mark_outside(Mesh& mesh, bool invert_faces = false);
+
+    // Per-input "is the tet inside this input mesh?" data, computed once via
+    // winding number against each ORIGINAL input geometry (params.surface_sizing_Vs/Fs).
+    // Consumed by output_tracked_surface_per_input.
+    //   kept_t_ids[idx]  : tet IDs of non-removed tets, in iteration order
+    //   Ws[i](idx)       : winding number of tet kept_t_ids[idx] against input i
+    // empty() == true when per-input geometry is unavailable (single-input or
+    // legacy callers).
+    struct PerInputData {
+        std::vector<int> kept_t_ids;
+        std::vector<Eigen::VectorXd> Ws;
+        bool empty() const { return Ws.empty() || kept_t_ids.empty(); }
+        int n_inputs() const { return (int)Ws.size(); }
+    };
+
+    PerInputData compute_per_input_data(Mesh& mesh);
+
+    // Drop-in replacement for filter_outside in the multi-input (--inputs) path.
+    // Uses the per-input winding numbers in `data` to decide inside/outside for
+    // each tet (kept iff at least one input contains it), bypassing:
+    //   - get_tracked_surface (heavy bfs_orient + duplicate-vertex merge)
+    //   - the merged-surface fast_winding_number
+    //   - _sf.stl / _tracked_surface.stl writes inside filter_outside
+    // Falls back to the original filter_outside when `data.empty()`.
+    void filter_outside_per_input(Mesh& mesh, const PerInputData& data,
+                                  bool invert_faces = false);
+
+    // Overwrite _tracked_surface.stl with a per-input boundary surface that is
+    // robust to is_surface_fs holes (FAIL subdivide_tets, untangle clears).
+    // For each input mesh i, emits every tet face whose two adjacent tets
+    // disagree on "is inside input i" (winding-number based). Each input's
+    // boundary is oriented outward from that input's interior. When two inputs
+    // overlap in volume, BOTH input boundaries are emitted in full (including
+    // the parts that lie inside the other input's interior).
+    void output_tracked_surface_per_input(Mesh& mesh, const std::string& path,
+                                          const PerInputData& data);
     void smooth_open_boundary(Mesh& mesh, const AABBWrapper& tree);
     void smooth_open_boundary_aux(Mesh& mesh, const AABBWrapper& tree);
     void manifold_surface(Mesh& mesh);

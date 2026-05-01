@@ -110,11 +110,12 @@ namespace floatTetWild {
             bbox_maxes.push_back(bbox_max);
         }
 
-        // Store per-mesh geometry for surface-based sizing field
-        if (use_surface_sizing) {
-            input_Vs = Vs;
-            input_Fs = Fs;
-        }
+        // Store per-mesh geometry. Used by surface-based sizing (when enabled)
+        // and by per-region identification (winding-number test against each
+        // input mesh, which is robust against triangle-insertion failures that
+        // break the in-mesh boundary tracking).
+        input_Vs = Vs;
+        input_Fs = Fs;
 
         merge(Vs, Fs, V, F, sf_mesh, tags);
         return true;

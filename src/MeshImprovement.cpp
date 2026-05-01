@@ -27,7 +27,61 @@
 #include <igl/Timer.h>
 #include <igl/winding_number.h>
 
+#include <fstream>
+#include <iomanip>
+#include <limits>
+
 //#define USE_FWN true
+
+namespace {
+    // ASCII STL writer that preserves full double precision in vertex coords.
+    // The standard binary STL format stores 32-bit floats (≈ 7 significant
+    // digits), which loses geometry detail when fTetWild is built with
+    // double Scalar (FLOAT_TETWILD_USE_FLOAT=OFF, the default). ASCII STL is
+    // standard-compliant and accepts arbitrary precision; we emit 17 digits
+    // (numeric_limits<double>::max_digits10), which is enough for exact
+    // round-trip of any IEEE 754 double.
+    //
+    // Triangle normals are computed from the three vertices (right-hand rule).
+    // Implemented in-house instead of touching igl::writeSTL (third party).
+    void write_stl_ascii_double(const std::string& path,
+                                const Eigen::MatrixXd& V,
+                                const Eigen::MatrixXi& F,
+                                const std::string& solid_name = "tracked_surface") {
+        std::ofstream out(path);
+        if (!out) {
+            return;
+        }
+        out << std::setprecision(std::numeric_limits<double>::max_digits10);
+        out << std::scientific;
+
+        out << "solid " << solid_name << "\n";
+        const Eigen::Index nf = F.rows();
+        for (Eigen::Index i = 0; i < nf; ++i) {
+            const int i0 = F(i, 0);
+            const int i1 = F(i, 1);
+            const int i2 = F(i, 2);
+            const Eigen::Vector3d v0 = V.row(i0);
+            const Eigen::Vector3d v1 = V.row(i1);
+            const Eigen::Vector3d v2 = V.row(i2);
+
+            Eigen::Vector3d n = (v1 - v0).cross(v2 - v0);
+            const double nrm = n.norm();
+            if (nrm > 0.0) n /= nrm;
+            else           n.setZero();
+
+            out << "facet normal "
+                << n[0] << ' ' << n[1] << ' ' << n[2] << "\n";
+            out << "  outer loop\n";
+            out << "    vertex " << v0[0] << ' ' << v0[1] << ' ' << v0[2] << "\n";
+            out << "    vertex " << v1[0] << ' ' << v1[1] << ' ' << v1[2] << "\n";
+            out << "    vertex " << v2[0] << ' ' << v2[1] << ' ' << v2[2] << "\n";
+            out << "  endloop\n";
+            out << "endfacet\n";
+        }
+        out << "endsolid " << solid_name << "\n";
+    }
+}
 
 void floatTetWild::init(Mesh &mesh, AABBWrapper& tree) {
     cout << "initializing..." << endl;
@@ -1545,6 +1599,220 @@ void floatTetWild::filter_outside_floodfill(Mesh& mesh, bool invert_faces) {
             continue;
         if (tet_vertices[i].conn_tets.empty())
             tet_vertices[i].is_removed = true;
+    }
+}
+
+floatTetWild::PerInputData floatTetWild::compute_per_input_data(Mesh& mesh) {
+    PerInputData data;
+    auto &tets = mesh.tets;
+    const auto &surface_Vs = mesh.params.surface_sizing_Vs;
+    const auto &surface_Fs = mesh.params.surface_sizing_Fs;
+
+    if (surface_Vs.empty() || surface_Fs.empty() ||
+        surface_Vs.size() != surface_Fs.size())
+        return data;
+
+    const int n_inputs = (int)surface_Vs.size();
+
+    data.kept_t_ids.reserve(tets.size());
+    for (int i = 0; i < (int)tets.size(); ++i) {
+        if (!tets[i].is_removed)
+            data.kept_t_ids.push_back(i);
+    }
+    if (data.kept_t_ids.empty())
+        return data;
+
+    Eigen::MatrixXd C(data.kept_t_ids.size(), 3);
+    for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx) {
+        int t_id = data.kept_t_ids[idx];
+        Vector3 c(0, 0, 0);
+        for (int j = 0; j < 4; ++j)
+            c += mesh.tet_vertices[tets[t_id][j]].pos;
+        c /= 4.0;
+        C.row(idx) = c.cast<double>().transpose();
+    }
+
+    data.Ws.resize(n_inputs);
+    for (int i = 0; i < n_inputs; ++i) {
+        const auto &Vs_i = surface_Vs[i];
+        const auto &Fs_i = surface_Fs[i];
+        if (Vs_i.empty() || Fs_i.empty()) {
+            data.Ws[i] = Eigen::VectorXd::Zero(data.kept_t_ids.size());
+            continue;
+        }
+        Eigen::MatrixXd V_i((int)Vs_i.size(), 3);
+        Eigen::MatrixXi F_i((int)Fs_i.size(), 3);
+        for (size_t v = 0; v < Vs_i.size(); ++v)
+            V_i.row(v) = Vs_i[v].cast<double>().transpose();
+        for (size_t f = 0; f < Fs_i.size(); ++f)
+            F_i.row(f) = Fs_i[f];
+
+        if (!mesh.params.use_general_wn)
+            floatTetWild::fast_winding_number(V_i, F_i, C, data.Ws[i]);
+        else
+            igl::winding_number(V_i, F_i, C, data.Ws[i]);
+    }
+
+    return data;
+}
+
+void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
+                                                    const std::string& path,
+                                                    const PerInputData& data) {
+    if (data.empty())
+        return;
+
+    auto &tets = mesh.tets;
+    auto &tet_vertices = mesh.tet_vertices;
+    const int n_inputs = data.n_inputs();
+
+    // Tet-id -> dense index into data.kept_t_ids / data.Ws[*]
+    std::vector<int> t_to_idx(tets.size(), -1);
+    for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx)
+        t_to_idx[data.kept_t_ids[idx]] = idx;
+
+    auto inside_input = [&](int t_id, int i) -> bool {
+        if (t_id < 0) return false;
+        if (tets[t_id].is_removed) return false;
+        int idx = t_to_idx[t_id];
+        if (idx < 0) return false;
+        return data.Ws[i](idx) > 0.5;
+    };
+
+    // For each kept tet face, for each input mesh i: emit the face exactly once
+    // (from the inside-i side) when the two adjacent tets disagree on inside-i.
+    // Triangle normal points TOWARD the apex (= INTO input i's interior).
+    std::vector<Vector3> out_V;
+    std::vector<int> out_F_flat;
+    out_V.reserve(data.kept_t_ids.size() * 4 * 3);
+    out_F_flat.reserve(data.kept_t_ids.size() * 4 * 3);
+
+    for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx) {
+        int t1 = data.kept_t_ids[idx];
+        auto &t = tets[t1];
+        // PerInputData was captured BEFORE filter_outside_per_input may have
+        // marked some of these tets as removed. Skip such stale entries here so
+        // we don't emit boundary triangles for removed tets.
+        if (t.is_removed) continue;
+        for (int j = 0; j < 4; ++j) {
+            int t2 = get_opp_t_id(t1, j, mesh);
+
+            const Vector3 &p0 = tet_vertices[t[(j + 1) % 4]].pos;
+            const Vector3 &p1 = tet_vertices[t[(j + 2) % 4]].pos;
+            const Vector3 &p2 = tet_vertices[t[(j + 3) % 4]].pos;
+            const Vector3 &apex = tet_vertices[t[j]].pos;
+
+            for (int i = 0; i < n_inputs; ++i) {
+                bool inside_t1 = (data.Ws[i](idx) > 0.5);
+                bool inside_t2 = inside_input(t2, i);
+                if (inside_t1 == inside_t2) continue;
+                if (!inside_t1) continue;
+
+                int base = (int)out_V.size();
+                out_V.push_back(p0);
+                out_V.push_back(p1);
+                out_V.push_back(p2);
+
+                if (Predicates::orient_3d(p0, p1, p2, apex) == Predicates::ORI_POSITIVE) {
+                    out_F_flat.push_back(base);
+                    out_F_flat.push_back(base + 1);
+                    out_F_flat.push_back(base + 2);
+                } else {
+                    out_F_flat.push_back(base);
+                    out_F_flat.push_back(base + 2);
+                    out_F_flat.push_back(base + 1);
+                }
+            }
+        }
+    }
+
+    int n_tris = (int)(out_F_flat.size() / 3);
+    Eigen::MatrixXd V_out((int)out_V.size(), 3);
+    Eigen::MatrixXi F_out(n_tris, 3);
+    for (size_t k = 0; k < out_V.size(); ++k)
+        V_out.row(k) = out_V[k].cast<double>().transpose();
+    for (int k = 0; k < n_tris; ++k)
+        F_out.row(k) << out_F_flat[3 * k], out_F_flat[3 * k + 1], out_F_flat[3 * k + 2];
+
+    // Custom ASCII STL writer (preserves full double precision; the third
+    // party igl::writeSTL outputs a binary STL truncated to 32-bit floats).
+    write_stl_ascii_double(path, V_out, F_out);
+}
+
+void floatTetWild::filter_outside_per_input(Mesh& mesh, const PerInputData& data,
+                                            bool invert_faces) {
+    // Fall back to the original filter_outside when per-input geometry is
+    // unavailable (single-input pipeline, or anything that didn't populate
+    // params.surface_sizing_Vs/Fs).
+    if (data.empty()) {
+        filter_outside(mesh, invert_faces);
+        return;
+    }
+
+    auto &tets = mesh.tets;
+
+    // Tet-id -> dense index into data.kept_t_ids / data.Ws[*]
+    std::vector<int> t_to_idx(tets.size(), -1);
+    for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx)
+        t_to_idx[data.kept_t_ids[idx]] = idx;
+
+    const int n_inputs = data.n_inputs();
+    int n_kept = 0;
+    std::vector<bool> old_flags(tets.size());
+
+    for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
+        auto &t = tets[t_id];
+        old_flags[t_id] = t.is_removed;
+
+        if (t.is_removed) continue;
+
+        int idx = t_to_idx[t_id];
+        if (idx < 0) {
+            // Not in PerInputData snapshot (was removed when data was captured).
+            // Mark removed so the downstream per-input boundary extraction is
+            // consistent (a kept tet must have data.Ws lookups available).
+            t.is_removed = true;
+            continue;
+        }
+
+        bool inside_any = false;
+        for (int i = 0; i < n_inputs; ++i) {
+            if (data.Ws[i](idx) > 0.5) {
+                inside_any = true;
+                break;
+            }
+        }
+
+        if (!inside_any) {
+            t.is_removed = true;
+        } else {
+            n_kept++;
+        }
+    }
+
+    if (n_kept == 0) {
+        // Roll back: per-input WN said no tet is inside any input. With
+        // correctly oriented input meshes this should not happen; recovering
+        // here matches the original filter_outside fallback semantics.
+        for (int t_id = 0; t_id < (int)tets.size(); ++t_id)
+            tets[t_id].is_removed = old_flags[t_id];
+        logger().error("filter_outside_per_input: no tet inside any input mesh "
+                       "(check input mesh orientation)");
+        return;
+    }
+
+    // Update vertex.is_removed: a vertex is dead iff all its incident tets are
+    // removed. Mirrors the bookkeeping in filter_outside().
+    for (auto &v : mesh.tet_vertices) {
+        if (v.is_removed) continue;
+        bool is_remove = true;
+        for (int t_id : v.conn_tets) {
+            if (!mesh.tets[t_id].is_removed) {
+                is_remove = false;
+                break;
+            }
+        }
+        v.is_removed = is_remove;
     }
 }
 

@@ -362,7 +362,7 @@ namespace floatTetWild {
         //   4. Skip points where stride > 1 and indices not aligned
         //   5. Always keep bbox boundary points
         //
-        // All kept points lie on the regular lattice → no Delaunay quality loss
+        // All kept points lie on the regular lattice -> no Delaunay quality loss
         void compute_octree_points(const Vector3 &min, const Vector3 &max,
                                    const Parameters &params, const AABBWrapper &tree,
                                    std::vector<Vector3> &voxels) {

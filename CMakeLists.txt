@@ -151,6 +151,11 @@ target_link_libraries(${PROJECT_NAME}
 if(FLOAT_TETWILD_ENABLE_TBB)
 	target_link_libraries(${PROJECT_NAME} PUBLIC tbb::tbb)
 	target_compile_definitions(${PROJECT_NAME} PUBLIC FLOAT_TETWILD_USE_TBB)
+	# Ensure the bundled TBB headers take priority over any system TBB (e.g. Anaconda)
+	# that may be pulled in transitively via the GMP include path.
+	target_include_directories(${PROJECT_NAME} BEFORE PUBLIC
+		"${FLOAT_TETWILD_EXTERNAL}/tbb/include"
+	)
 endif()
 
 ################################################################################

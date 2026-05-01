@@ -128,7 +128,8 @@ class Parameters
     bool use_general_wn = false;
 
     // Octree background grid: use adaptive octree instead of uniform grid
-    bool use_octree = false;
+//    bool use_octree = false;
+    bool use_octree = true;
     // Maximum octree depth (0 = auto)
     int octree_max_depth = 0;
     // Far-field grid spacing for octree (0 = auto, uses bbox_diag * box_scale)
@@ -199,7 +200,7 @@ class Parameters
     // rather than jumping all the way to the global default (1.0).
     //
     // Example (TKA): femur bbox (coarse) processed first sets result=0.15, then
-    // implant bbox (fine) blends from 0.075 → 0.15 over the transition zone,
+    // implant bbox (fine) blends from 0.075 -> 0.15 over the transition zone,
     // giving a physically correct multi-level gradient.
     Scalar get_sizing_scalar_at(const Vector3 &pt) const
     {
@@ -223,7 +224,7 @@ class Parameters
                 trans = ideal_edge_length * 5.0;
         }
 
-        // Process coarsest → finest so each finer bbox blends against the
+        // Process coarsest -> finest so each finer bbox blends against the
         // already-established coarser background, not the global default.
         Scalar result = far_field_scalar;
 
