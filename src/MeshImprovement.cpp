@@ -698,14 +698,6 @@ void floatTetWild::compute_surface_based_sizing(Mesh &mesh) {
 
     if (surfaces.empty()) return;
 
-    Scalar trans = params.bbox_transition_length;
-    if (trans <= 0.0) {
-        Scalar max_tel = 0;
-        for (auto &s : surfaces)
-            if (s.target_edge_length > max_tel) max_tel = s.target_edge_length;
-        trans = (max_tel > 0) ? max_tel * 5.0 : params.ideal_edge_length * 5.0;
-    }
-
     // Initialize all sizing_scalars to 1.0
     for (auto &v : mesh.tet_vertices) {
         if (!v.is_removed) v.sizing_scalar = 1.0;
@@ -715,6 +707,13 @@ void floatTetWild::compute_surface_based_sizing(Mesh &mesh) {
     // blends against the already-established coarser background.
     for (int si = (int)surfaces.size() - 1; si >= 0; --si) {
         auto &surf = surfaces[si];
+
+        // Per-surface transition width: explicit setting or 5x this surface's edge length
+        Scalar trans = params.bbox_transition_length;
+        if (trans <= 0.0) {
+            trans = (surf.target_edge_length > 0) ? surf.target_edge_length * 5.0
+                                                  : params.ideal_edge_length * 5.0;
+        }
 
         // Collect candidate vertices within bbox + transition zone
         std::vector<int> candidate_ids;

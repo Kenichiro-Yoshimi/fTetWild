@@ -214,22 +214,19 @@ class Parameters
 
         if (local_bboxes.empty()) return far_field_scalar;
 
-        // Determine transition zone width
-        Scalar trans = bbox_transition_length;
-        if (trans <= 0.0) {
-            // Auto: 5x the coarsest local target_edge_length
-            if (local_bboxes.back().target_edge_length > 0.0)
-                trans = local_bboxes.back().target_edge_length * 5.0;
-            else
-                trans = ideal_edge_length * 5.0;
-        }
-
         // Process coarsest -> finest so each finer bbox blends against the
         // already-established coarser background, not the global default.
         Scalar result = far_field_scalar;
 
         for (int i = (int)local_bboxes.size() - 1; i >= 0; --i) {
             const auto &bbox = local_bboxes[i];
+
+            // Per-bbox transition width: explicit setting or 5x this bbox's edge length
+            Scalar trans = bbox_transition_length;
+            if (trans <= 0.0) {
+                trans = (bbox.target_edge_length > 0.0) ? bbox.target_edge_length * 5.0
+                                                        : ideal_edge_length * 5.0;
+            }
 
             // Signed distance to bbox boundary: positive = inside, negative = outside.
             Scalar dx = std::min(pt[0] - bbox.bbox_min[0], bbox.bbox_max[0] - pt[0]);
