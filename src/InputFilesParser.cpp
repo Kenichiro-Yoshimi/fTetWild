@@ -51,6 +51,11 @@ namespace floatTetWild {
                     skip_simplify = file["skip_simplify"];
                 skip_simplifies.push_back(skip_simplify);
 
+                Scalar per_transition = 0.0;
+                if(file["transition_length"].is_number())
+                    per_transition = file["transition_length"];
+                transition_lengths.push_back(per_transition);
+
                 existings[name] = index++;
             }
         }

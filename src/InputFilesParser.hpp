@@ -37,6 +37,7 @@ public:
     std::vector<Scalar>  target_edge_lengths;
     std::vector<Scalar>  eps_inputs;
     std::vector<bool>    skip_simplifies;
+    std::vector<Scalar>  transition_lengths;
     Scalar               transition_length = 0.0;
     bool                 use_surface_sizing = false;
     Scalar               max_cell_size = 0.0;  // Far-field grid spacing for octree (0 = auto)

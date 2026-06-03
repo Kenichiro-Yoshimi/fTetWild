@@ -28,6 +28,7 @@ public:
     Vector3 bbox_max;
     Scalar  target_edge_length;
     Scalar  sizing_scalar;
+    Scalar  transition_length = 0.0;
 
     bool operator<(const SurfaceSizingData &another) const {
         return target_edge_length < another.target_edge_length;
@@ -59,6 +60,7 @@ public:
     Vector3 bbox_max;
     Scalar  target_edge_length;
     Scalar  sizing_scalar;
+    Scalar  transition_length = 0.0;
 };
 
 class Parameters
@@ -147,11 +149,14 @@ class Parameters
     std::vector<std::vector<Vector3i>> surface_sizing_Fs;
 
     void set_local_bboxes(std::vector<Vector3> &bbox_mins, std::vector<Vector3> &bbox_maxes,
-                          std::vector<Scalar> &target_edge_lengths, Scalar ideal_edge_length)
+                          std::vector<Scalar> &target_edge_lengths,
+                          std::vector<Scalar> &transition_lengths,
+                          Scalar ideal_edge_length)
     {
-        for (int b_id = 0; b_id < target_edge_lengths.size(); ++b_id) {
+        for (int b_id = 0; b_id < (int)target_edge_lengths.size(); ++b_id) {
             LocalBBox bbox(bbox_mins[b_id], bbox_maxes[b_id], target_edge_lengths[b_id], ideal_edge_length);
-
+            if (b_id < (int)transition_lengths.size())
+                bbox.transition_length = transition_lengths[b_id];
             local_bboxes.push_back(bbox);
         }
     }
@@ -160,7 +165,9 @@ class Parameters
         std::vector<std::vector<Vector3>> &Vs,
         std::vector<std::vector<Vector3i>> &Fs,
         std::vector<Vector3> &bbox_mins, std::vector<Vector3> &bbox_maxes,
-        std::vector<Scalar> &target_edge_lengths, Scalar ideal_edge_length)
+        std::vector<Scalar> &target_edge_lengths,
+        std::vector<Scalar> &transition_lengths,
+        Scalar ideal_edge_length)
     {
         surface_sizing_data.clear();
         for (int i = 0; i < (int)Vs.size(); ++i) {
@@ -173,6 +180,8 @@ class Parameters
             data.sizing_scalar = 1.0;
             if (target_edge_lengths[i] > 0.0)
                 data.sizing_scalar = target_edge_lengths[i] / ideal_edge_length;
+            if (i < (int)transition_lengths.size())
+                data.transition_length = transition_lengths[i];
             surface_sizing_data.push_back(std::move(data));
         }
         std::sort(surface_sizing_data.begin(), surface_sizing_data.end());
@@ -221,12 +230,13 @@ class Parameters
         for (int i = (int)local_bboxes.size() - 1; i >= 0; --i) {
             const auto &bbox = local_bboxes[i];
 
-            // Per-bbox transition width: explicit setting or 5x this bbox's edge length
-            Scalar trans = bbox_transition_length;
-            if (trans <= 0.0) {
-                trans = (bbox.target_edge_length > 0.0) ? bbox.target_edge_length * 5.0
-                                                        : ideal_edge_length * 5.0;
-            }
+            // Transition width priority: per-surface > global > default
+            // Default uses the coarsest local target_edge_length (last in sorted order).
+            Scalar trans = bbox.transition_length;
+            if (trans <= 0.0) trans = bbox_transition_length;
+            if (trans <= 0.0 && !local_bboxes.empty() && local_bboxes.back().target_edge_length > 0.0)
+                trans = local_bboxes.back().target_edge_length * 5.0;
+            if (trans <= 0.0) trans = ideal_edge_length * 5.0;
 
             // Signed distance to bbox boundary: positive = inside, negative = outside.
             Scalar dx = std::min(pt[0] - bbox.bbox_min[0], bbox.bbox_max[0] - pt[0]);

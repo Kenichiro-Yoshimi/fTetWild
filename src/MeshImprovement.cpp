@@ -708,12 +708,13 @@ void floatTetWild::compute_surface_based_sizing(Mesh &mesh) {
     for (int si = (int)surfaces.size() - 1; si >= 0; --si) {
         auto &surf = surfaces[si];
 
-        // Per-surface transition width: explicit setting or 5x this surface's edge length
-        Scalar trans = params.bbox_transition_length;
-        if (trans <= 0.0) {
-            trans = (surf.target_edge_length > 0) ? surf.target_edge_length * 5.0
-                                                  : params.ideal_edge_length * 5.0;
-        }
+        // Transition width priority: per-surface > global > default
+        // Default uses the coarsest surface's target_edge_length (last in sorted order).
+        Scalar trans = surf.transition_length;
+        if (trans <= 0.0) trans = params.bbox_transition_length;
+        if (trans <= 0.0 && !surfaces.empty() && surfaces.back().target_edge_length > 0.0)
+            trans = surfaces.back().target_edge_length * 5.0;
+        if (trans <= 0.0) trans = params.ideal_edge_length * 5.0;
 
         // Collect candidate vertices within bbox + transition zone
         std::vector<int> candidate_ids;

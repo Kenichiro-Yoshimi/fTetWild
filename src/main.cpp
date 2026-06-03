@@ -291,6 +291,7 @@ int main(int argc, char **argv) {
     std::vector<Vector3> input_bbox_mins;
     std::vector<Vector3> input_bbox_maxes;
     std::vector<Scalar> target_edge_lengths;
+    std::vector<Scalar> transition_lengths;
 
     if (!params.tag_path.empty()) {
         input_tags.reserve(input_faces.size());
@@ -351,6 +352,7 @@ int main(int argc, char **argv) {
             input_bbox_mins = parser.bbox_mins;
             input_bbox_maxes = parser.bbox_maxes;
             target_edge_lengths = parser.target_edge_lengths;
+            transition_lengths = parser.transition_lengths;
             params.bbox_transition_length = parser.transition_length;
             if (parser.max_cell_size > 0.0)
                 params.octree_max_cell_size = parser.max_cell_size;
@@ -387,11 +389,13 @@ int main(int argc, char **argv) {
         // Surface-based sizing: use actual geometry for inside/outside test
         params.set_surface_sizing_data(params.surface_sizing_Vs, params.surface_sizing_Fs,
                                        input_bbox_mins, input_bbox_maxes,
-                                       target_edge_lengths, params.ideal_edge_length);
+                                       target_edge_lengths, transition_lengths,
+                                       params.ideal_edge_length);
     }
     // Always set bbox-based data (used as fallback for get_sizing_scalar_at)
     params.set_local_bboxes(input_bbox_mins, input_bbox_maxes,
-                            target_edge_lengths, params.ideal_edge_length);
+                            target_edge_lengths, transition_lengths,
+                            params.ideal_edge_length);
     std::sort(params.local_bboxes.begin(), params.local_bboxes.end());
 
 #ifdef LIBIGL_WITH_TETGEN
