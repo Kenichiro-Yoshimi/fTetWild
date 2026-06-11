@@ -61,11 +61,19 @@ namespace floatTetWild {
 
     // Overwrite _tracked_surface.stl with a per-input boundary surface that is
     // robust to is_surface_fs holes (FAIL subdivide_tets, untangle clears).
-    // For each input mesh i, emits every tet face whose two adjacent tets
-    // disagree on "is inside input i" (winding-number based). Each input's
-    // boundary is oriented outward from that input's interior. When two inputs
-    // overlap in volume, BOTH input boundaries are emitted in full (including
-    // the parts that lie inside the other input's interior).
+    // A tet face is emitted (from the kept side, oriented into that side's
+    // volume) when either:
+    //  (a) WN rule: some input mesh i contains this tet but not the neighbor
+    //      (winding-number based; outer boundaries, robust to surface holes),
+    //  (b) region rule: both tets are kept but belong to different regions of
+    //      the surface-blocked flood fill (connected components of kept tets
+    //      whose adjacency does not cross an is_surface_fs face). This
+    //      restores internal walls between solids that live in the SAME input
+    //      file (identical winding numbers on both sides, invisible to (a))
+    //      and the intersection boundaries of overlapping solids.
+    // Internal walls between two kept regions are emitted twice with opposite
+    // normals. If the tracked face set has a hole in a wall, the two regions
+    // merge and (b) degrades to (a)'s behavior — never worse than WN-only.
     void output_tracked_surface_per_input(Mesh& mesh, const std::string& path,
                                           const PerInputData& data);
     void smooth_open_boundary(Mesh& mesh, const AABBWrapper& tree);

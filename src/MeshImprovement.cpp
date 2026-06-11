@@ -30,6 +30,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 
 //#define USE_FWN true
 
@@ -1679,13 +1680,237 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
         return data.Ws[i](idx) > 0.5;
     };
 
-    // For each kept tet face, for each input mesh i: emit the face exactly once
-    // (from the inside-i side) when the two adjacent tets disagree on inside-i.
-    // Triangle normal points TOWARD the apex (= INTO input i's interior).
+    // Region decomposition: connected components of the kept tets, where
+    // adjacency does NOT cross a tracked-surface face (is_surface_fs), same
+    // barrier as filter_outside_floodfill. Two closed solids that share a
+    // coincident internal wall inside ONE input file have identical per-input
+    // winding numbers on both sides of the wall (both "inside input i"), so
+    // the WN rule below cannot see the wall — but the wall triangles were
+    // inserted and tracked, so the flood fill is blocked there and the two
+    // solids get different region ids. Likewise, the intersection surface of
+    // two overlapping solids in one file separates the overlap volume into
+    // its own region. is_surface_fs can have local holes (FAIL subdivide_tets,
+    // untangle clears); a leaked wall merely merges two regions and degrades
+    // to the WN-only behavior, never worse than it.
+    std::vector<int> region_of(tets.size(), -1);
+    int n_regions = 0;
+    {
+        std::queue<int> q;
+        for (int seed = 0; seed < (int)tets.size(); ++seed) {
+            if (tets[seed].is_removed || region_of[seed] >= 0)
+                continue;
+            region_of[seed] = n_regions;
+            q.push(seed);
+            while (!q.empty()) {
+                int t_id = q.front();
+                q.pop();
+                for (int j = 0; j < 4; ++j) {
+                    if (tets[t_id].is_surface_fs[j] != NOT_SURFACE)
+                        continue;
+                    int n_id = get_opp_t_id(t_id, j, mesh);
+                    if (n_id < 0 || tets[n_id].is_removed || region_of[n_id] >= 0)
+                        continue;
+                    // Surface flags are stored on both sides of a face; check
+                    // the neighbor's mirror face too in case only one side
+                    // survived (asymmetric clears).
+                    int k = get_local_f_id(n_id, tets[t_id][(j + 1) % 4],
+                                           tets[t_id][(j + 2) % 4],
+                                           tets[t_id][(j + 3) % 4], mesh);
+                    if (tets[n_id].is_surface_fs[k] != NOT_SURFACE)
+                        continue;
+                    region_of[n_id] = n_regions;
+                    q.push(n_id);
+                }
+            }
+            ++n_regions;
+        }
+        logger().info("output_tracked_surface_per_input: {} surface-bounded regions",
+                      n_regions);
+    }
+
+    // Merge tiny regions into their dominant neighbor before using region ids
+    // for emission. Near contact zones between inputs, eps-close tracked faces
+    // can enclose thin pockets of a few tets; emitting walls around every such
+    // pocket floods the downstream region splitter with spurious micro regions
+    // (TKA: 102 regions vs 41 without the region rule, 59 of them < 100 tets,
+    // many single-tet). Outer boundaries of merged pockets are still emitted
+    // by the WN rule; only same-WN-signature region-rule walls around them are
+    // suppressed.
+    if (n_regions > 1) {
+        std::vector<int> region_size(n_regions, 0);
+        int kept_cnt = 0;
+        for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
+            if (region_of[t_id] >= 0) {
+                ++region_size[region_of[t_id]];
+                ++kept_cnt;
+            }
+        }
+        // Scale-free threshold with a small absolute floor. A region below
+        // ~1e-4 of the kept volume spans only a few elements at the local
+        // target edge length and is not a meaningful material region.
+        const int threshold = std::max(10, kept_cnt / 10000);
+
+        // Per-region majority WN signature: which inputs contain the region.
+        // A pocket must merge into a SAME-signature neighbor whenever one
+        // exists: merging into a different-signature neighbor leaves the
+        // pocket wrapped by WN-rule faces on one side and region-rule faces
+        // on the other, enclosing a spurious micro region downstream.
+        std::vector<std::vector<char>> region_sig(n_regions,
+                                                  std::vector<char>(n_inputs, 0));
+        {
+            std::vector<std::vector<int>> in_cnt(n_regions,
+                                                 std::vector<int>(n_inputs, 0));
+            std::vector<int> tot(n_regions, 0);
+            for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
+                int r = region_of[t_id];
+                if (r < 0) continue;
+                int idx = t_to_idx[t_id];
+                if (idx < 0) continue;
+                ++tot[r];
+                for (int i = 0; i < n_inputs; ++i)
+                    if (data.Ws[i](idx) > 0.5) ++in_cnt[r][i];
+            }
+            for (int r = 0; r < n_regions; ++r)
+                for (int i = 0; i < n_inputs; ++i)
+                    region_sig[r][i] = (2 * in_cnt[r][i] > tot[r]) ? 1 : 0;
+        }
+
+        std::vector<int> root(n_regions);
+        for (int r = 0; r < n_regions; ++r)
+            root[r] = r;
+        auto find_root = [&root](int r) {
+            while (root[r] != r) {
+                root[r] = root[root[r]];
+                r = root[r];
+            }
+            return r;
+        };
+
+        while (true) {
+            // Shared-face counts between current root pairs.
+            std::map<std::pair<int, int>, int> shared;
+            for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
+                if (region_of[t_id] < 0) continue;
+                int r1 = find_root(region_of[t_id]);
+                for (int j = 0; j < 4; ++j) {
+                    int n_id = get_opp_t_id(t_id, j, mesh);
+                    if (n_id <= t_id || tets[n_id].is_removed || region_of[n_id] < 0)
+                        continue;
+                    int r2 = find_root(region_of[n_id]);
+                    if (r1 == r2) continue;
+                    ++shared[{std::min(r1, r2), std::max(r1, r2)}];
+                }
+            }
+            std::vector<int> root_size(n_regions, 0);
+            for (int r = 0; r < n_regions; ++r)
+                root_size[find_root(r)] += region_size[r];
+
+            bool changed = false;
+            for (int r = 0; r < n_regions; ++r) {
+                if (find_root(r) != r || root_size[r] >= threshold)
+                    continue;
+                // Prefer the same-signature neighbor with the most shared
+                // faces; fall back to any neighbor only when no neighbor has
+                // the same signature.
+                int best = -1, best_cnt = 0;
+                int best_any = -1, best_any_cnt = 0;
+                for (auto &kv : shared) {
+                    int other = -1;
+                    if (kv.first.first == r) other = kv.first.second;
+                    else if (kv.first.second == r) other = kv.first.first;
+                    if (other < 0) continue;
+                    if (kv.second > best_any_cnt) {
+                        best_any_cnt = kv.second;
+                        best_any = other;
+                    }
+                    if (region_sig[other] == region_sig[r] && kv.second > best_cnt) {
+                        best_cnt = kv.second;
+                        best = other;
+                    }
+                }
+                if (best < 0) best = best_any;
+                if (best >= 0) {
+                    int b = find_root(best); // may have merged this round
+                    if (b != r) {
+                        root[r] = b;
+                        changed = true;
+                    }
+                }
+            }
+            if (!changed) break;
+        }
+
+        int n_merged = 0;
+        for (int r = 0; r < n_regions; ++r)
+            if (find_root(r) != r) ++n_merged;
+        if (n_merged > 0) {
+            for (auto &r : region_of)
+                if (r >= 0) r = find_root(r);
+            logger().info("output_tracked_surface_per_input: merged {} tiny regions "
+                          "(< {} tets) into neighbors, {} regions remain",
+                          n_merged, threshold, n_regions - n_merged);
+        }
+    }
+
+    // For each kept tet face: emit the face from this side when
+    //   (a) WN rule: some input i contains this tet but not the neighbor
+    //       (outer boundaries and overlap boundaries; robust to
+    //       is_surface_fs holes), or
+    //   (b) second sheet of a WN wall: regions differ and the OPPOSITE side
+    //       fires the WN rule — the face coincides with an (a) face, so the
+    //       wall gets both orientations like every other internal wall, or
+    //   (c) pure region wall: regions differ and neither side fires the WN
+    //       rule (internal walls between solids of the SAME input file).
+    //       These are collected first and filtered by connected-component
+    //       size: around contact zones a handful of leftover tracked faces
+    //       can wall off single-tet pockets, producing isolated 2-10 face
+    //       sliver patches (TKA: 28 spurious 1-3 cell downstream regions),
+    //       while a genuine internal wall spans hundreds of connected faces
+    //       (two-box test: 166 per side). Components below min_wall_faces
+    //       are dropped; surviving faces are emitted from both sides.
+    // Internal walls are thus emitted twice, once per side with opposite
+    // normals. Triangle normal points TOWARD the apex (= INTO this region).
     std::vector<Vector3> out_V;
     std::vector<int> out_F_flat;
     out_V.reserve(data.kept_t_ids.size() * 4 * 3);
     out_F_flat.reserve(data.kept_t_ids.size() * 4 * 3);
+
+    auto emit_side = [&](int t_id, int j) {
+        const auto &tt = tets[t_id];
+        const Vector3 &p0 = tet_vertices[tt[(j + 1) % 4]].pos;
+        const Vector3 &p1 = tet_vertices[tt[(j + 2) % 4]].pos;
+        const Vector3 &p2 = tet_vertices[tt[(j + 3) % 4]].pos;
+        const Vector3 &apex = tet_vertices[tt[j]].pos;
+
+        int base = (int)out_V.size();
+        out_V.push_back(p0);
+        out_V.push_back(p1);
+        out_V.push_back(p2);
+
+        if (Predicates::orient_3d(p0, p1, p2, apex) == Predicates::ORI_POSITIVE) {
+            out_F_flat.push_back(base);
+            out_F_flat.push_back(base + 1);
+            out_F_flat.push_back(base + 2);
+        } else {
+            out_F_flat.push_back(base);
+            out_F_flat.push_back(base + 2);
+            out_F_flat.push_back(base + 1);
+        }
+    };
+
+    // Does the WN rule fire from the side whose dense index is idx_a, against
+    // neighbor tet t_b?
+    auto wn_fires = [&](int idx_a, int t_b) {
+        for (int i = 0; i < n_inputs; ++i)
+            if (data.Ws[i](idx_a) > 0.5 && !inside_input(t_b, i))
+                return true;
+        return false;
+    };
+
+    struct PureWallFace {
+        int t1, j, t2;
+    };
+    std::vector<PureWallFace> pure_walls;
 
     for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx) {
         int t1 = data.kept_t_ids[idx];
@@ -1697,33 +1922,74 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
         for (int j = 0; j < 4; ++j) {
             int t2 = get_opp_t_id(t1, j, mesh);
 
-            const Vector3 &p0 = tet_vertices[t[(j + 1) % 4]].pos;
-            const Vector3 &p1 = tet_vertices[t[(j + 2) % 4]].pos;
-            const Vector3 &p2 = tet_vertices[t[(j + 3) % 4]].pos;
-            const Vector3 &apex = tet_vertices[t[j]].pos;
+            if (wn_fires(idx, t2)) { // (a)
+                emit_side(t1, j);
+                continue;
+            }
+            if (t2 < 0 || tets[t2].is_removed || region_of[t1] == region_of[t2])
+                continue;
+            int idx2 = t_to_idx[t2];
+            if (idx2 >= 0 && wn_fires(idx2, t1)) { // (b)
+                emit_side(t1, j);
+                continue;
+            }
+            if (t1 < t2) // (c) record the face once; both sides emitted later
+                pure_walls.push_back({t1, j, t2});
+        }
+    }
 
-            for (int i = 0; i < n_inputs; ++i) {
-                bool inside_t1 = (data.Ws[i](idx) > 0.5);
-                bool inside_t2 = inside_input(t2, i);
-                if (inside_t1 == inside_t2) continue;
-                if (!inside_t1) continue;
+    // (c) component filter: connect pure wall faces sharing an edge, drop
+    // isolated sliver patches.
+    if (!pure_walls.empty()) {
+        const int min_wall_faces = 20;
+        std::vector<int> uf(pure_walls.size());
+        for (int c = 0; c < (int)uf.size(); ++c)
+            uf[c] = c;
+        auto uf_find = [&uf](int c) {
+            while (uf[c] != c) {
+                uf[c] = uf[uf[c]];
+                c = uf[c];
+            }
+            return c;
+        };
 
-                int base = (int)out_V.size();
-                out_V.push_back(p0);
-                out_V.push_back(p1);
-                out_V.push_back(p2);
-
-                if (Predicates::orient_3d(p0, p1, p2, apex) == Predicates::ORI_POSITIVE) {
-                    out_F_flat.push_back(base);
-                    out_F_flat.push_back(base + 1);
-                    out_F_flat.push_back(base + 2);
-                } else {
-                    out_F_flat.push_back(base);
-                    out_F_flat.push_back(base + 2);
-                    out_F_flat.push_back(base + 1);
-                }
+        std::map<std::pair<int, int>, int> edge_owner;
+        for (int c = 0; c < (int)pure_walls.size(); ++c) {
+            const auto &f = pure_walls[c];
+            const auto &t = tets[f.t1];
+            int v[3] = {t[(f.j + 1) % 4], t[(f.j + 2) % 4], t[(f.j + 3) % 4]};
+            for (int e = 0; e < 3; ++e) {
+                auto key = std::make_pair(std::min(v[e], v[(e + 1) % 3]),
+                                          std::max(v[e], v[(e + 1) % 3]));
+                auto it = edge_owner.find(key);
+                if (it == edge_owner.end())
+                    edge_owner[key] = c;
+                else
+                    uf[uf_find(c)] = uf_find(it->second);
             }
         }
+
+        std::vector<int> comp_size(pure_walls.size(), 0);
+        for (int c = 0; c < (int)pure_walls.size(); ++c)
+            ++comp_size[uf_find(c)];
+
+        int n_dropped = 0;
+        for (int c = 0; c < (int)pure_walls.size(); ++c) {
+            const auto &f = pure_walls[c];
+            if (comp_size[uf_find(c)] < min_wall_faces) {
+                ++n_dropped;
+                continue;
+            }
+            emit_side(f.t1, f.j);
+            const auto &t = tets[f.t1];
+            int k = get_local_f_id(f.t2, t[(f.j + 1) % 4], t[(f.j + 2) % 4],
+                                   t[(f.j + 3) % 4], mesh);
+            emit_side(f.t2, k);
+        }
+        if (n_dropped > 0)
+            logger().info("output_tracked_surface_per_input: dropped {} sliver "
+                          "wall faces (components < {} faces)",
+                          n_dropped, min_wall_faces);
     }
 
     int n_tris = (int)(out_F_flat.size() / 3);
