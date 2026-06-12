@@ -50,8 +50,15 @@ namespace floatTetWild {
     PerInputData compute_per_input_data(Mesh& mesh);
 
     // Drop-in replacement for filter_outside in the multi-input (--inputs) path.
-    // Uses the per-input winding numbers in `data` to decide inside/outside for
-    // each tet (kept iff at least one input contains it), bypassing:
+    // Uses the per-input winding numbers in `data` to decide inside/outside,
+    // voting per surface-bounded region (flood fill blocked at is_surface_fs
+    // faces): a region that is >=90% inside some input is kept whole, <=10%
+    // is dropped whole, anything in between falls back to the per-tet WN
+    // test. Region voting fixes the per-tet 0.5-threshold flicker along
+    // internal shared walls (simplify keeps only one of the two coincident
+    // wall sheets, so WN near the open sheet is W +- ~0.5): no more interior
+    // tets dropped at the wall, no more exterior tets kept past the boundary.
+    // Bypasses:
     //   - get_tracked_surface (heavy bfs_orient + duplicate-vertex merge)
     //   - the merged-surface fast_winding_number
     //   - _sf.stl / _tracked_surface.stl writes inside filter_outside

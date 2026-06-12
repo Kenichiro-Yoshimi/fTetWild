@@ -1657,44 +1657,20 @@ floatTetWild::PerInputData floatTetWild::compute_per_input_data(Mesh& mesh) {
     return data;
 }
 
-void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
-                                                    const std::string& path,
-                                                    const PerInputData& data) {
-    if (data.empty())
-        return;
-
-    auto &tets = mesh.tets;
-    auto &tet_vertices = mesh.tet_vertices;
-    const int n_inputs = data.n_inputs();
-
-    // Tet-id -> dense index into data.kept_t_ids / data.Ws[*]
-    std::vector<int> t_to_idx(tets.size(), -1);
-    for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx)
-        t_to_idx[data.kept_t_ids[idx]] = idx;
-
-    auto inside_input = [&](int t_id, int i) -> bool {
-        if (t_id < 0) return false;
-        if (tets[t_id].is_removed) return false;
-        int idx = t_to_idx[t_id];
-        if (idx < 0) return false;
-        return data.Ws[i](idx) > 0.5;
-    };
-
-    // Region decomposition: connected components of the kept tets, where
-    // adjacency does NOT cross a tracked-surface face (is_surface_fs), same
-    // barrier as filter_outside_floodfill. Two closed solids that share a
-    // coincident internal wall inside ONE input file have identical per-input
-    // winding numbers on both sides of the wall (both "inside input i"), so
-    // the WN rule below cannot see the wall — but the wall triangles were
-    // inserted and tracked, so the flood fill is blocked there and the two
-    // solids get different region ids. Likewise, the intersection surface of
-    // two overlapping solids in one file separates the overlap volume into
-    // its own region. is_surface_fs can have local holes (FAIL subdivide_tets,
-    // untangle clears); a leaked wall merely merges two regions and degrades
-    // to the WN-only behavior, never worse than it.
-    std::vector<int> region_of(tets.size(), -1);
-    int n_regions = 0;
+namespace {
+    // Label connected components of the non-removed tets, where adjacency
+    // does NOT cross a tracked-surface (is_surface_fs) face — the same
+    // barrier as filter_outside_floodfill. Tracked faces (input surfaces,
+    // including internal shared walls and overlap-intersection surfaces) thus
+    // separate the mesh into surface-bounded regions. region_of[t] = -1 for
+    // removed tets. Returns the number of regions.
+    int compute_surface_blocked_regions(floatTetWild::Mesh& mesh,
+                                        std::vector<int>& region_of)
     {
+        using namespace floatTetWild;
+        auto &tets = mesh.tets;
+        region_of.assign(tets.size(), -1);
+        int n_regions = 0;
         std::queue<int> q;
         for (int seed = 0; seed < (int)tets.size(); ++seed) {
             if (tets[seed].is_removed || region_of[seed] >= 0)
@@ -1724,9 +1700,47 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
             }
             ++n_regions;
         }
-        logger().info("output_tracked_surface_per_input: {} surface-bounded regions",
-                      n_regions);
+        return n_regions;
     }
+}
+
+void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
+                                                    const std::string& path,
+                                                    const PerInputData& data) {
+    if (data.empty())
+        return;
+
+    auto &tets = mesh.tets;
+    auto &tet_vertices = mesh.tet_vertices;
+    const int n_inputs = data.n_inputs();
+
+    // Tet-id -> dense index into data.kept_t_ids / data.Ws[*]
+    std::vector<int> t_to_idx(tets.size(), -1);
+    for (int idx = 0; idx < (int)data.kept_t_ids.size(); ++idx)
+        t_to_idx[data.kept_t_ids[idx]] = idx;
+
+    auto inside_input = [&](int t_id, int i) -> bool {
+        if (t_id < 0) return false;
+        if (tets[t_id].is_removed) return false;
+        int idx = t_to_idx[t_id];
+        if (idx < 0) return false;
+        return data.Ws[i](idx) > 0.5;
+    };
+
+    // Region decomposition. Two closed solids that share a coincident
+    // internal wall inside ONE input file have identical per-input winding
+    // numbers on both sides of the wall (both "inside input i"), so the WN
+    // rule below cannot see the wall — but the wall triangles were inserted
+    // and tracked, so the flood fill is blocked there and the two solids get
+    // different region ids. Likewise, the intersection surface of two
+    // overlapping solids in one file separates the overlap volume into its
+    // own region. is_surface_fs can have local holes (FAIL subdivide_tets,
+    // untangle clears); a leaked wall merely merges two regions and degrades
+    // to the WN-only behavior, never worse than it.
+    std::vector<int> region_of;
+    int n_regions = compute_surface_blocked_regions(mesh, region_of);
+    logger().info("output_tracked_surface_per_input: {} surface-bounded regions",
+                  n_regions);
 
     // Merge tiny regions into their dominant neighbor before using region ids
     // for emission. Near contact zones between inputs, eps-close tracked faces
@@ -1852,6 +1866,44 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
         }
     }
 
+    // Region-level inside/outside per input, consistent with the region vote
+    // in filter_outside_per_input. The filter keeps whole regions, including
+    // wall-adjacent tets whose raw per-tet WN flickers below 0.5 (open-sheet
+    // near field, see filter_outside_per_input); judging emission by raw
+    // per-tet WN would wrap each such kept tet in a tiny closed shell (TKA:
+    // 100 spurious micro regions downstream). A region with >=90% of its tets
+    // inside input i counts as inside-i, <=10% as outside-i; only the
+    // ambiguous band falls back to the per-tet value.
+    std::vector<std::vector<double>> region_frac(n_regions,
+                                                 std::vector<double>(n_inputs, 0.0));
+    {
+        std::vector<int> tot(n_regions, 0);
+        for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
+            int r = region_of[t_id];
+            if (r < 0) continue;
+            int idx = t_to_idx[t_id];
+            if (idx < 0) continue;
+            ++tot[r];
+            for (int i = 0; i < n_inputs; ++i)
+                if (data.Ws[i](idx) > 0.5) region_frac[r][i] += 1.0;
+        }
+        for (int r = 0; r < n_regions; ++r)
+            if (tot[r] > 0)
+                for (int i = 0; i < n_inputs; ++i)
+                    region_frac[r][i] /= tot[r];
+    }
+
+    auto inside_eff = [&](int t_id, int i) -> bool {
+        if (t_id < 0) return false;
+        if (tets[t_id].is_removed) return false;
+        int r = region_of[t_id];
+        if (r >= 0) {
+            if (region_frac[r][i] >= 0.9) return true;
+            if (region_frac[r][i] <= 0.1) return false;
+        }
+        return inside_input(t_id, i); // ambiguous region: per-tet fallback
+    };
+
     // For each kept tet face: emit the face from this side when
     //   (a) WN rule: some input i contains this tet but not the neighbor
     //       (outer boundaries and overlap boundaries; robust to
@@ -1898,11 +1950,10 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
         }
     };
 
-    // Does the WN rule fire from the side whose dense index is idx_a, against
-    // neighbor tet t_b?
-    auto wn_fires = [&](int idx_a, int t_b) {
+    // Does the WN rule fire from tet t_a's side against neighbor tet t_b?
+    auto wn_fires = [&](int t_a, int t_b) {
         for (int i = 0; i < n_inputs; ++i)
-            if (data.Ws[i](idx_a) > 0.5 && !inside_input(t_b, i))
+            if (inside_eff(t_a, i) && !inside_eff(t_b, i))
                 return true;
         return false;
     };
@@ -1922,14 +1973,13 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
         for (int j = 0; j < 4; ++j) {
             int t2 = get_opp_t_id(t1, j, mesh);
 
-            if (wn_fires(idx, t2)) { // (a)
+            if (wn_fires(t1, t2)) { // (a)
                 emit_side(t1, j);
                 continue;
             }
             if (t2 < 0 || tets[t2].is_removed || region_of[t1] == region_of[t2])
                 continue;
-            int idx2 = t_to_idx[t2];
-            if (idx2 >= 0 && wn_fires(idx2, t1)) { // (b)
+            if (wn_fires(t2, t1)) { // (b)
                 emit_side(t1, j);
                 continue;
             }
@@ -2023,6 +2073,53 @@ void floatTetWild::filter_outside_per_input(Mesh& mesh, const PerInputData& data
         t_to_idx[data.kept_t_ids[idx]] = idx;
 
     const int n_inputs = data.n_inputs();
+
+    auto inside_any_tet = [&](int t_id) -> bool {
+        int idx = t_to_idx[t_id];
+        if (idx < 0) return false;
+        for (int i = 0; i < n_inputs; ++i)
+            if (data.Ws[i](idx) > 0.5)
+                return true;
+        return false;
+    };
+
+    // Region-level vote. simplify's remove_duplicates deletes one of the two
+    // coincident sheets of an internal shared wall, so the winding number is
+    // computed against an OPEN sheet whose near field is W_envelope ± ~0.5:
+    // per-tet thresholding at 0.5 then flickers along the wall, sporadically
+    // dropping interior tets (one side of the wall) and keeping exterior tets
+    // near the wall rim (mesh protruding past the boundary by up to an
+    // element, far beyond eps_input). Both failure modes are fixed by voting
+    // per surface-bounded region — interior regions are overwhelmingly
+    // inside, the exterior region is overwhelmingly outside — while ambiguous
+    // regions (tracked-face holes merging interior with exterior) fall back
+    // to the per-tet decision, so a degraded tracked surface never makes the
+    // result worse than the previous behavior.
+    std::vector<int> region_of;
+    int n_regions = compute_surface_blocked_regions(mesh, region_of);
+
+    std::vector<int> region_total(n_regions, 0), region_in(n_regions, 0);
+    for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
+        int r = region_of[t_id];
+        if (r < 0) continue;
+        ++region_total[r];
+        if (inside_any_tet(t_id)) ++region_in[r];
+    }
+
+    enum class RegionVote { Keep, Drop, PerTet };
+    std::vector<RegionVote> vote(n_regions, RegionVote::PerTet);
+    int n_keep_r = 0, n_drop_r = 0, n_pertet_r = 0;
+    for (int r = 0; r < n_regions; ++r) {
+        if (region_total[r] == 0) continue;
+        double f = (double)region_in[r] / region_total[r];
+        if (f >= 0.9) { vote[r] = RegionVote::Keep; ++n_keep_r; }
+        else if (f <= 0.1) { vote[r] = RegionVote::Drop; ++n_drop_r; }
+        else ++n_pertet_r;
+    }
+    logger().info("filter_outside_per_input: {} regions ({} keep, {} drop, "
+                  "{} per-tet fallback)",
+                  n_regions, n_keep_r, n_drop_r, n_pertet_r);
+
     int n_kept = 0;
     std::vector<bool> old_flags(tets.size());
 
@@ -2041,15 +2138,14 @@ void floatTetWild::filter_outside_per_input(Mesh& mesh, const PerInputData& data
             continue;
         }
 
-        bool inside_any = false;
-        for (int i = 0; i < n_inputs; ++i) {
-            if (data.Ws[i](idx) > 0.5) {
-                inside_any = true;
-                break;
-            }
+        bool keep;
+        switch (vote[region_of[t_id]]) {
+            case RegionVote::Keep: keep = true; break;
+            case RegionVote::Drop: keep = false; break;
+            default:               keep = inside_any_tet(t_id); break;
         }
 
-        if (!inside_any) {
+        if (!keep) {
             t.is_removed = true;
         } else {
             n_kept++;
