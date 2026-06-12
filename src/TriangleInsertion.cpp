@@ -1741,6 +1741,26 @@ void floatTetWild::find_boundary_edges(const std::vector<Vector3> &input_vertice
                     is_on_cut_edges.push_back(false);
             }
             cnt1++;
+        } else if (n12_f_ids.size() > 2) {//non-manifold edge
+            // E.g. the rim where an internal wall meets the outer surface
+            // (wall sheet + two outer sheets = 3 incident faces). Without
+            // boundary preservation, rim vertices are only constrained to the
+            // UNION surface envelope, so they can slide along the outer
+            // surface arbitrarily far from the wall plane while every check
+            // passes -- the wall's tracked border then deviates from the true
+            // rim by much more than eps. Registering the edge here routes it
+            // through the existing open-boundary machinery (b_tree envelope +
+            // is_on_boundary projection), which pins rim vertices to the rim
+            // curve within eps.
+            cnt2++;
+            b_edges.push_back(e);
+            if(needs_preserve) {
+                b_edge_infos.push_back(std::make_pair(e, n12_f_ids));
+                if(!uninserted_n12_f_ids.empty())
+                    is_on_cut_edges.push_back(true);
+                else
+                    is_on_cut_edges.push_back(false);
+            }
         } else {
             int f_id = n12_f_ids[0];
             int j = 0;
