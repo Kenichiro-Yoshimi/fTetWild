@@ -31,6 +31,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <unordered_map>
 
 //#define USE_FWN true
 
@@ -1658,17 +1659,135 @@ floatTetWild::PerInputData floatTetWild::compute_per_input_data(Mesh& mesh) {
 }
 
 namespace {
-    // Label connected components of the non-removed tets, where adjacency
-    // does NOT cross a tracked-surface (is_surface_fs) face — the same
-    // barrier as filter_outside_floodfill. Tracked faces (input surfaces,
-    // including internal shared walls and overlap-intersection surfaces) thus
-    // separate the mesh into surface-bounded regions. region_of[t] = -1 for
-    // removed tets. Returns the number of regions.
-    int compute_surface_blocked_regions(floatTetWild::Mesh& mesh,
-                                        std::vector<int>& region_of)
+    static inline long long edge_key(int a, int b) {
+        if (a > b) std::swap(a, b);
+        return ((long long)a << 32) | (unsigned)b;
+    }
+
+    // Heal pinhole gaps in the tracked-surface barrier. subdivide_tets FAIL
+    // recovery and untangle can clear is_surface_fs on a few faces, leaving a
+    // 1-2 element hole in an otherwise complete internal wall. The region
+    // flood fill leaks through any such hole and merges two genuinely separate
+    // solids (e.g. an internal wall 208/212 faces tracked still loses the
+    // whole boundary). A face is plugged iff (1) all THREE of its edges already
+    // bound a barrier face — so it is enclosed by the wall rather than opening
+    // into bulk volume — AND (2) its normal is nearly coplanar with the wall
+    // faces on at least two of those edges. The coplanarity test rejects the
+    // faces just inside a wall rim (where a wall meets the outer surface):
+    // those touch a barrier on every edge too, but face into the volume at a
+    // large angle to the wall, so without (2) they would be over-plugged into
+    // spurious closed pockets. Plugging propagates across multi-face holes over
+    // a few passes. healed[t][j] marks added barriers (symmetric on both
+    // sides).
+    void compute_healed_barriers(floatTetWild::Mesh& mesh,
+                                 std::vector<std::array<char, 4>>& healed)
     {
         using namespace floatTetWild;
         auto &tets = mesh.tets;
+        auto &tv = mesh.tet_vertices;
+        healed.assign(tets.size(), {{0, 0, 0, 0}});
+
+        const double cos_tol = 0.766; // ~40 deg; lenient for curved walls
+
+        auto face_normal = [&](int a, int b, int c) {
+            Vector3 n = (tv[b].pos - tv[a].pos).cross(tv[c].pos - tv[a].pos);
+            double l = n.norm();
+            return (l > 0) ? Vector3(n / l) : Vector3(0, 0, 0);
+        };
+
+        std::unordered_map<long long, int> edge_bcnt;
+        std::unordered_map<long long, Vector3> edge_bn; // a barrier normal per edge
+        edge_bcnt.reserve(tets.size());
+        edge_bn.reserve(tets.size());
+        auto add_edges = [&](int a, int b, int c) {
+            Vector3 n = face_normal(a, b, c);
+            int v[3] = {a, b, c};
+            for (int e = 0; e < 3; ++e) {
+                long long k = edge_key(v[e], v[(e + 1) % 3]);
+                edge_bcnt[k]++;
+                edge_bn.emplace(k, n);
+            }
+        };
+        auto edge_has_barrier = [&](int a, int b) {
+            auto it = edge_bcnt.find(edge_key(a, b));
+            return it != edge_bcnt.end() && it->second > 0;
+        };
+        auto edge_coplanar = [&](int a, int b, const Vector3 &nf) {
+            auto it = edge_bn.find(edge_key(a, b));
+            if (it == edge_bn.end()) return false;
+            return std::abs(nf.dot(it->second)) > cos_tol;
+        };
+
+        // Seed edge counts from the real tracked faces (each counted once).
+        for (int t = 0; t < (int)tets.size(); ++t) {
+            if (tets[t].is_removed) continue;
+            for (int j = 0; j < 4; ++j) {
+                if (tets[t].is_surface_fs[j] == NOT_SURFACE) continue;
+                int opp = get_opp_t_id(t, j, mesh);
+                if (opp >= 0 && opp < t && !tets[opp].is_removed) continue;
+                add_edges(tets[t][(j + 1) % 4], tets[t][(j + 2) % 4],
+                          tets[t][(j + 3) % 4]);
+            }
+        }
+
+        bool changed = true;
+        int passes = 0;
+        int n_healed = 0;
+        while (changed && passes < 8) {
+            changed = false;
+            ++passes;
+            for (int t = 0; t < (int)tets.size(); ++t) {
+                if (tets[t].is_removed) continue;
+                for (int j = 0; j < 4; ++j) {
+                    if (tets[t].is_surface_fs[j] != NOT_SURFACE || healed[t][j])
+                        continue;
+                    int opp = get_opp_t_id(t, j, mesh);
+                    if (opp < 0 || tets[opp].is_removed || opp < t) continue;
+                    int a = tets[t][(j + 1) % 4];
+                    int b = tets[t][(j + 2) % 4];
+                    int c = tets[t][(j + 3) % 4];
+                    if (!edge_has_barrier(a, b) || !edge_has_barrier(b, c) ||
+                        !edge_has_barrier(c, a))
+                        continue;
+                    Vector3 nf = face_normal(a, b, c);
+                    int n_cop = (int)edge_coplanar(a, b, nf)
+                              + (int)edge_coplanar(b, c, nf)
+                              + (int)edge_coplanar(c, a, nf);
+                    if (n_cop < 2) continue;
+                    healed[t][j] = 1;
+                    int k = get_local_f_id(opp, a, b, c, mesh);
+                    healed[opp][k] = 1;
+                    add_edges(a, b, c);
+                    changed = true;
+                    ++n_healed;
+                }
+            }
+        }
+        if (n_healed > 0)
+            logger().info("compute_healed_barriers: plugged {} barrier pinhole "
+                          "faces in {} passes", n_healed, passes);
+    }
+
+    // Label connected components of the non-removed tets, where adjacency
+    // does NOT cross a tracked-surface (is_surface_fs) face — the same
+    // barrier as filter_outside_floodfill, plus healed pinhole faces so a tiny
+    // gap in a wall does not leak two solids into one region. Tracked faces
+    // (input surfaces, including internal shared walls and overlap-intersection
+    // surfaces) thus separate the mesh into surface-bounded regions.
+    // region_of[t] = -1 for removed tets. Returns the number of regions.
+    int compute_surface_blocked_regions(floatTetWild::Mesh& mesh,
+                                        std::vector<int>& region_of,
+                                        bool heal)
+    {
+        using namespace floatTetWild;
+        auto &tets = mesh.tets;
+
+        std::vector<std::array<char, 4>> healed;
+        if (heal)
+            compute_healed_barriers(mesh, healed);
+        else
+            healed.assign(tets.size(), {{0, 0, 0, 0}});
+
         region_of.assign(tets.size(), -1);
         int n_regions = 0;
         std::queue<int> q;
@@ -1681,7 +1800,7 @@ namespace {
                 int t_id = q.front();
                 q.pop();
                 for (int j = 0; j < 4; ++j) {
-                    if (tets[t_id].is_surface_fs[j] != NOT_SURFACE)
+                    if (tets[t_id].is_surface_fs[j] != NOT_SURFACE || healed[t_id][j])
                         continue;
                     int n_id = get_opp_t_id(t_id, j, mesh);
                     if (n_id < 0 || tets[n_id].is_removed || region_of[n_id] >= 0)
@@ -1738,7 +1857,7 @@ void floatTetWild::output_tracked_surface_per_input(Mesh& mesh,
     // untangle clears); a leaked wall merely merges two regions and degrades
     // to the WN-only behavior, never worse than it.
     std::vector<int> region_of;
-    int n_regions = compute_surface_blocked_regions(mesh, region_of);
+    int n_regions = compute_surface_blocked_regions(mesh, region_of, /*heal=*/true);
     logger().info("output_tracked_surface_per_input: {} surface-bounded regions",
                   n_regions);
 
@@ -2095,8 +2214,13 @@ void floatTetWild::filter_outside_per_input(Mesh& mesh, const PerInputData& data
     // regions (tracked-face holes merging interior with exterior) fall back
     // to the per-tet decision, so a degraded tracked surface never makes the
     // result worse than the previous behavior.
+    // No healing here: the keep/drop vote is unaffected by wall pinholes (a
+    // leaked region that merges two interiors is still kept; one that merges
+    // interior with exterior falls to the per-tet test), so leave the filter
+    // identical to the proven per-tet-equivalent behavior and heal only for
+    // the tracked-surface separation in output_tracked_surface_per_input.
     std::vector<int> region_of;
-    int n_regions = compute_surface_blocked_regions(mesh, region_of);
+    int n_regions = compute_surface_blocked_regions(mesh, region_of, /*heal=*/false);
 
     std::vector<int> region_total(n_regions, 0), region_in(n_regions, 0);
     for (int t_id = 0; t_id < (int)tets.size(); ++t_id) {
