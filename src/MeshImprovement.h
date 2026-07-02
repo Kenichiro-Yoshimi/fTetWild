@@ -51,13 +51,19 @@ namespace floatTetWild {
 
     // Drop-in replacement for filter_outside in the multi-input (--inputs) path.
     // Uses the per-input winding numbers in `data` to decide inside/outside,
-    // voting per surface-bounded region (flood fill blocked at is_surface_fs
-    // faces): a region that is >=90% inside some input is kept whole, <=10%
-    // is dropped whole, anything in between falls back to the per-tet WN
-    // test. Region voting fixes the per-tet 0.5-threshold flicker along
-    // internal shared walls (simplify keeps only one of the two coincident
-    // wall sheets, so WN near the open sheet is W +- ~0.5): no more interior
-    // tets dropped at the wall, no more exterior tets kept past the boundary.
+    // voting per surface-bounded region. Regions are connected components of
+    // the tets where an adjacency is blocked iff the segment between the two
+    // tet barycenters crosses the input surface — watertight by construction
+    // whenever the input surface is watertight, hence immune to is_surface_fs
+    // holes (FAIL subdivide_tets, untangle clears) at any resolution. A
+    // region that is >=90% inside some input is kept whole, <=10% is dropped
+    // whole, anything in between falls back to the per-tet WN test. Region
+    // voting fixes the per-tet 0.5-threshold flicker along internal shared
+    // walls (simplify keeps only one of the two coincident wall sheets, so
+    // WN near the open sheet is W +- ~0.5): no more interior tets dropped at
+    // the wall, no more exterior tets kept past the boundary, and the kept
+    // volume boundary follows the surface-crossing faces (within an element
+    // of the input surface) instead of the WN flicker.
     // Bypasses:
     //   - get_tracked_surface (heavy bfs_orient + duplicate-vertex merge)
     //   - the merged-surface fast_winding_number
@@ -66,21 +72,18 @@ namespace floatTetWild {
     void filter_outside_per_input(Mesh& mesh, const PerInputData& data,
                                   bool invert_faces = false);
 
-    // Overwrite _tracked_surface.stl with a per-input boundary surface that is
-    // robust to is_surface_fs holes (FAIL subdivide_tets, untangle clears).
+    // Overwrite _tracked_surface.stl with a per-input boundary surface.
     // A tet face is emitted (from the kept side, oriented into that side's
     // volume) when either:
     //  (a) WN rule: some input mesh i contains this tet but not the neighbor
-    //      (winding-number based; outer boundaries, robust to surface holes),
+    //      (region-voted winding numbers; outer boundaries),
     //  (b) region rule: both tets are kept but belong to different regions of
-    //      the surface-blocked flood fill (connected components of kept tets
-    //      whose adjacency does not cross an is_surface_fs face). This
-    //      restores internal walls between solids that live in the SAME input
-    //      file (identical winding numbers on both sides, invisible to (a))
-    //      and the intersection boundaries of overlapping solids.
+    //      the barycenter-segment flood fill (see filter_outside_per_input).
+    //      This restores internal walls between solids that live in the SAME
+    //      input file (identical winding numbers on both sides, invisible to
+    //      (a)) and the intersection boundaries of overlapping solids.
     // Internal walls between two kept regions are emitted twice with opposite
-    // normals. If the tracked face set has a hole in a wall, the two regions
-    // merge and (b) degrades to (a)'s behavior — never worse than WN-only.
+    // normals.
     void output_tracked_surface_per_input(Mesh& mesh, const std::string& path,
                                           const PerInputData& data);
     void smooth_open_boundary(Mesh& mesh, const AABBWrapper& tree);
