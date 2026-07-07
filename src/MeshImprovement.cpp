@@ -604,6 +604,15 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
     Scalar refine_scale = 0.5;
     Scalar min_refine_scale = mesh.params.min_edge_len_rel / mesh.params.ideal_edge_length_rel;
 
+    // Vertices on SEVERELY bad tets keep the original deep refinement floor
+    // (min_refine_scale): those slivers genuinely need finer-than-target
+    // elements to be resolved. Everyone else is floored at half the local
+    // target below, which is what stops the broad x0.5-per-stall runaway
+    // (the runaway is driven by wide zones sitting just above the filter
+    // energy, not by the few deeply stuck slivers).
+    const Scalar severe_energy = mesh.params.stop_energy * 3;
+    std::vector<char> is_severe(tet_vertices.size(), 0);
+
     const int N = -int(std::log2(min_refine_scale) - 1);
     std::vector<std::vector<int>> v_ids(N, std::vector<int>());
     for (int i = 0; i < tet_vertices.size(); i++) {
@@ -615,6 +624,8 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
         for (int t_id: v.conn_tets) {
             if (tets[t_id].quality > filter_energy)
                 is_refine = true;
+            if (tets[t_id].quality > severe_energy)
+                is_severe[i] = 1;
         }
         if (!is_refine)
             continue;
@@ -678,18 +689,35 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
     }
 
     // update scalars
+    const bool has_local_targets = !mesh.params.local_bboxes.empty();
     for (int i=0;i< tet_vertices.size();i++) {
         auto& v = tet_vertices[i];
         if (v.is_removed)
             continue;
         Scalar new_scale = v.sizing_scalar * scale_multipliers[i];
+
+        // Floor the energy-driven refinement at half the LOCAL target size.
+        // Without this the x0.5-per-stall refinement compounds down to
+        // min_edge_length near surfaces (envelope-constrained tets keep the
+        // energy high), and once the tracked surface is refined that far it
+        // can never be coarsened back to the target within the envelope --
+        // an irreversible ratchet that makes the final density run-dependent
+        // (same vertebra input: 121k vs 1.38M tets, boundary edges down to
+        // min_edge = 0.14mm against a 4mm target).
+        Scalar floor_scale = min_refine_scale;
+        if (has_local_targets && scale_multipliers[i] < 1 && !is_severe[i]) {
+            Scalar target = mesh.params.get_sizing_scalar_at(v.pos);
+            if (target < 1)
+                floor_scale = std::max(floor_scale, Scalar(0.5) * target);
+        }
+
         if (new_scale > 1)
             v.sizing_scalar = 1;
 //        if (new_scale > mesh.tri_vertices[i].max_scale)
 //            mesh.tri_vertices[i].scale = mesh.tri_vertices[i].max_scale;
-        else if (new_scale < min_refine_scale) {
+        else if (new_scale < floor_scale) {
             is_hit_min_edge_length = true;
-            v.sizing_scalar = min_refine_scale;
+            v.sizing_scalar = floor_scale;
         } else
             v.sizing_scalar = new_scale;
     }
