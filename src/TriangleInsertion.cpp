@@ -946,7 +946,12 @@ void floatTetWild::find_cutting_tets(int f_id, const std::vector<Vector3> &input
             tbb_t_ids.push_back(t_id);
 
         });
-        for(int t_id: tbb_t_ids) {
+        // Sort collected ids: concurrent_vector push order is nondeterministic,
+        // and the BFS seed order changes CutMesh construction downstream,
+        // making insertion results irreproducible across runs.
+        std::vector<int> sorted_t_ids(tbb_t_ids.begin(), tbb_t_ids.end());
+        std::sort(sorted_t_ids.begin(), sorted_t_ids.end());
+        for(int t_id: sorted_t_ids) {
             queue_t_ids.push(t_id);
             is_visited[t_id] = true;
         }

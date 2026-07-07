@@ -138,7 +138,12 @@ void floatTetWild::vertex_smoothing(Mesh& mesh, const AABBWrapper& tree){
     std::vector<std::vector<int>> concurrent_sets;
     std::vector<int> serial_set;
     // mesh.one_ring_vertex_sets(tbb::task_scheduler_init::default_num_threads()*2, concurrent_sets, serial_set);
-    mesh.one_ring_vertex_sets(mesh.params.num_threads*2, concurrent_sets, serial_set);
+    // The serial/concurrent split threshold must NOT depend on the thread count:
+    // it changes the order vertices are smoothed in, and smoothing reads neighbor
+    // positions, so a thread-count-dependent threshold makes the result depend on
+    // --max-threads. Use a fixed constant (parallelizing sets smaller than this
+    // has no benefit anyway).
+    mesh.one_ring_vertex_sets(100, concurrent_sets, serial_set);
 
     for(const auto &s : concurrent_sets){
         tbb::parallel_for( size_t(0), size_t(s.size()), [&]( size_t i ){
