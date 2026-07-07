@@ -218,7 +218,8 @@ int main(int argc, char **argv) {
     bool use_floodfill = false;
     command_line.add_flag("--use-floodfill", use_floodfill, "Use flood-fill to extract interior volume.");
     command_line.add_flag("--use-general-wn", params.use_general_wn, "Use general winding number.");
-    command_line.add_flag("--octree", params.use_octree, "Use octree-based adaptive background grid.");
+    command_line.add_flag("--octree,!--no-octree", params.use_octree,
+                          "Use octree-based adaptive background grid (--no-octree for uniform grid).");
     command_line.add_option("--octree-max-depth", params.octree_max_depth,
                             "Maximum octree depth (0 = auto). Default: 0");
     command_line.add_option("--octree-max-cell-size", params.octree_max_cell_size,
