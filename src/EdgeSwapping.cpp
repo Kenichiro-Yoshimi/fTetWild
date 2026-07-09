@@ -15,7 +15,7 @@ namespace floatTetWild {
     bool is_es_check = false;
 }
 
-void floatTetWild::edge_swapping(Mesh& mesh) {
+int floatTetWild::edge_swapping(Mesh& mesh) {
     auto &tet_vertices = mesh.tet_vertices;
     auto &tets = mesh.tets;
 
@@ -97,6 +97,7 @@ void floatTetWild::edge_swapping(Mesh& mesh) {
     cout << "success4 = " << suc_counter4 << endl;
     cout << "success5 = " << suc_counter5 << endl;
     cout << "success = " << (suc_counter3 + suc_counter4 + suc_counter5) << "(" << counter << ")" << endl;
+    return suc_counter3 + suc_counter4 + suc_counter5;
 }
 
 bool floatTetWild::remove_an_edge_32(Mesh& mesh, int v1_id, int v2_id, const std::vector<int>& old_t_ids, std::vector<std::array<int, 2>>& new_edges){

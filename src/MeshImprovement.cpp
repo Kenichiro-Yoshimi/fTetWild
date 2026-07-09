@@ -211,6 +211,8 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
     bool is_hit_min_edge_length = false;
     std::vector<std::array<Scalar, 2>> quality_queue;
     int cnt_increase_epsilon = mesh.params.stage - 1;
+    int zero_suc_streak = 0;
+    int passes_since_param_change = 0;
     for (int it = 0; it < mesh.params.max_its; it++) {
         if (mesh.is_input_all_inserted)
             it_after_al_inserted++;
@@ -233,7 +235,12 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
             it_ops = {{ops[0], ops[1], ops[2], ops[3], 1}};
         else
             it_ops = {{ops[0], ops[1], ops[2], ops[3], 0}};
-        operation(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree, it_ops);
+        const int pass_suc_ops =
+                operation(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree, it_ops);
+        // Track whether anything that influences the NEXT pass (envelope eps,
+        // sizing field) changes during this pass. Needed for the fixed-point
+        // early stop below.
+        bool params_changed = false;
 
         if (it > mesh.params.max_its / 4 && max_energy > 1e3) {//Scalar check
             if (cnt_increase_epsilon > 0 && cnt_increase_epsilon == mesh.params.stage - 1) {
@@ -241,6 +248,7 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
                 mesh.params.eps += mesh.params.eps_delta;
                 mesh.params.eps_2 = mesh.params.eps * mesh.params.eps;
                 cnt_increase_epsilon--;
+                params_changed = true;
                 cout << "enlarge envelope, eps = " << mesh.params.eps << endl;
 //                pausee();
             }
@@ -250,13 +258,17 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
         get_max_avg_energy(mesh, new_max_energy, new_avg_energy);
         if (!is_just_after_update) {
             if (max_energy - new_max_energy < 5e-1 && (avg_energy - new_avg_energy) / avg_energy < 0.1) {
-                is_hit_min_edge_length = update_scaling_field(mesh, new_max_energy) || is_hit_min_edge_length;
+                bool field_changed = false;
+                is_hit_min_edge_length =
+                        update_scaling_field(mesh, new_max_energy, &field_changed) || is_hit_min_edge_length;
+                params_changed = params_changed || field_changed;
                 is_just_after_update = true;
                 if (cnt_increase_epsilon > 0) {
 //                    mesh.params.eps += mesh.params.eps_input / mesh.params.stage;
                     mesh.params.eps += mesh.params.eps_delta;
                     mesh.params.eps_2 = mesh.params.eps * mesh.params.eps;
                     cnt_increase_epsilon--;
+                    params_changed = true;
                     cout << "enlarge envelope, eps = " << mesh.params.eps << endl;
 //                    pausee();
                 }
@@ -264,11 +276,68 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
         } else
             is_just_after_update = false;
 
+        if (params_changed)
+            passes_since_param_change = 0;
+        else
+            passes_since_param_change++;
+
+        // Early stop 1 (fixed point): if a whole pass accepted zero operations
+        // and neither eps nor the sizing field changed, the next pass runs on
+        // bit-identical state with bit-identical parameters, so (the pipeline
+        // being deterministic) every following pass is guaranteed to be a
+        // no-op too. Require a streak of 3 passes so that one full
+        // split/collapse/swap + smoothing cycle (smoothing runs on every 3rd
+        // pass) is covered.
+        if (pass_suc_ops == 0 && !params_changed)
+            zero_suc_streak++;
+        else
+            zero_suc_streak = 0;
+        if (zero_suc_streak >= 3 && mesh.is_input_all_inserted) {
+            cout << "///////////////// mesh is a fixed point (no operation accepted for "
+                 << zero_suc_streak << " passes), stopping early /////////////////" << endl;
+            break;
+        }
+
         quality_queue.push_back(std::array<Scalar, 2>({{new_max_energy, new_avg_energy}}));
         if (is_hit_min_edge_length && mesh.is_input_all_inserted && it_after_al_inserted > M && it > M + N) {
-            if (quality_queue[it][0] - quality_queue[it - N][0] >= SCALAR_ZERO
-                && quality_queue[it][1] - quality_queue[it - N][1] >= SCALAR_ZERO)
+            // Early stop 2 (stagnation): stop when neither max nor avg energy
+            // improved meaningfully (relative 0.1%) over the last N passes.
+            // (The original condition only fired when quality got strictly
+            // WORSE, so a flat plateau kept iterating until max_its.)
+            // Gate on passes_since_param_change: a stall normally triggers
+            // update_scaling_field, whose refinement takes a few passes to pay
+            // off (split -> collapse -> swap -> smooth), so a plateau is only
+            // final once the sizing field and eps have been unchanged for a
+            // full window. Otherwise a temporary plateau right before a
+            // refinement-driven recovery would be cut short.
+            static const Scalar min_rel_improve = 1e-3;
+            if (passes_since_param_change >= N
+                && quality_queue[it][0] - quality_queue[it - N][0] >=
+                    -min_rel_improve * quality_queue[it - N][0]
+                && quality_queue[it][1] - quality_queue[it - N][1] >=
+                    -min_rel_improve * quality_queue[it - N][1]) {
+                cout << "///////////////// energy stagnated for " << N
+                     << " passes at the refinement floor, stopping early /////////////////" << endl;
                 break;
+            }
+
+            // Early stop 3 (long-window stagnation): on a dead plateau,
+            // update_scaling_field keeps oscillating the sizing field forever
+            // (refine x0.5 on every stall, recover x1.5 elsewhere), so
+            // passes_since_param_change may never open the gate above. A
+            // refinement cycle pays off within a few passes, so if a much
+            // longer window shows no energy progress at all, the plateau is
+            // final regardless of the field still being touched.
+            const int NL = 3 * N;
+            if (it > M + NL
+                && quality_queue[it][0] - quality_queue[it - NL][0] >=
+                    -min_rel_improve * quality_queue[it - NL][0]
+                && quality_queue[it][1] - quality_queue[it - NL][1] >=
+                    -min_rel_improve * quality_queue[it - NL][1]) {
+                cout << "///////////////// energy stagnated for " << NL
+                     << " passes (sizing field still oscillating), stopping early /////////////////" << endl;
+                break;
+            }
 
 //            bool is_break = true;
 //            for (int j = 0; j < N; j++) {
@@ -372,18 +441,19 @@ void floatTetWild::cleanup_empty_slots(Mesh &mesh, double percentage) {
     cout<<mesh.tets.size()<<endl;
 }
 
-void floatTetWild::operation(const std::vector<Vector3> &input_vertices, const std::vector<Vector3i> &input_faces, const std::vector<int> &input_tags, std::vector<bool> &is_face_inserted,
+int floatTetWild::operation(const std::vector<Vector3> &input_vertices, const std::vector<Vector3i> &input_faces, const std::vector<int> &input_tags, std::vector<bool> &is_face_inserted,
         Mesh &mesh, AABBWrapper& tree, const std::array<int, 5> &ops) {
     igl::Timer igl_timer;
     int v_num, t_num;
     double max_energy, avg_energy;
     double time;
+    int suc_ops_total = 0;
 
     for (int i = 0; i < ops[0]; i++) {
         igl_timer.start();
         cout << "edge splitting..." << endl;
-        untangle(mesh);
-        edge_splitting(mesh, tree);
+        suc_ops_total += untangle(mesh);
+        suc_ops_total += edge_splitting(mesh, tree);
         time = igl_timer.getElapsedTime();
         cout << "edge splitting done!" << endl;
         cout << "time = " << time << "s" << endl;
@@ -401,8 +471,8 @@ void floatTetWild::operation(const std::vector<Vector3> &input_vertices, const s
     for (int i = 0; i < ops[1]; i++) {
         igl_timer.start();
         cout << "edge collapsing..." << endl;
-        untangle(mesh);
-        edge_collapsing(mesh, tree);
+        suc_ops_total += untangle(mesh);
+        suc_ops_total += edge_collapsing(mesh, tree);
         time = igl_timer.getElapsedTime();
         cout << "edge collapsing done!" << endl;
         cout << "time = " << time << "s" << endl;
@@ -420,8 +490,8 @@ void floatTetWild::operation(const std::vector<Vector3> &input_vertices, const s
     for (int i = 0; i < ops[2]; i++) {
         igl_timer.start();
         cout << "edge swapping..." << endl;
-        untangle(mesh);
-        edge_swapping(mesh);
+        suc_ops_total += untangle(mesh);
+        suc_ops_total += edge_swapping(mesh);
         time = igl_timer.getElapsedTime();
         cout << "edge swapping done!" << endl;
         cout << "time = " << time << "s" << endl;
@@ -439,7 +509,7 @@ void floatTetWild::operation(const std::vector<Vector3> &input_vertices, const s
     for (int i = 0; i < ops[3]; i++) {
         igl_timer.start();
         cout << "vertex smoothing..." << endl;
-        vertex_smoothing(mesh, tree);
+        suc_ops_total += vertex_smoothing(mesh, tree);
         time = igl_timer.getElapsedTime();
         cout << "vertex smoothing done!" << endl;
         cout << "time = " << time << "s" << endl;
@@ -568,11 +638,17 @@ void floatTetWild::operation(const std::vector<Vector3> &input_vertices, const s
 //                                                           std::count(is_face_inserted.begin(), is_face_inserted.end(),
 //                                                                      false));
 //        }
+        // re-insertion modifies the mesh; make sure the caller does not treat
+        // this pass as a fixed point
+        if (ops[4] > 0)
+            suc_ops_total++;
     }
+
+    return suc_ops_total;
 }
 
 #include <geogram/points/kd_tree.h>
-bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
+bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy, bool *field_changed) {
 //    return false;
 
     auto &tets = mesh.tets;
@@ -689,11 +765,14 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
     }
 
     // update scalars
+    if (field_changed)
+        *field_changed = false;
     const bool has_local_targets = !mesh.params.local_bboxes.empty();
     for (int i=0;i< tet_vertices.size();i++) {
         auto& v = tet_vertices[i];
         if (v.is_removed)
             continue;
+        const Scalar old_sizing_scalar = v.sizing_scalar;
         Scalar new_scale = v.sizing_scalar * scale_multipliers[i];
 
         // Floor the energy-driven refinement at half the LOCAL target size.
@@ -720,6 +799,9 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy) {
             v.sizing_scalar = floor_scale;
         } else
             v.sizing_scalar = new_scale;
+
+        if (field_changed && v.sizing_scalar != old_sizing_scalar)
+            *field_changed = true;
     }
 
     cout << "is_hit_min_edge_length = " << is_hit_min_edge_length << endl;
@@ -2443,7 +2525,7 @@ void floatTetWild::mark_outside(Mesh& mesh, bool invert_faces){
     }
 }
 
-void floatTetWild::untangle(Mesh &mesh) {
+int floatTetWild::untangle(Mesh &mesh) {
 //    return;
     auto &tet_vertices = mesh.tet_vertices;
     auto &tets = mesh.tets;
@@ -2580,6 +2662,7 @@ void floatTetWild::untangle(Mesh &mesh) {
 //        //fortest
     }
     cout << "fixed " + std::to_string(cnt) + " tangled element" << endl;
+    return cnt;
 }
 
 void floatTetWild::smooth_open_boundary(Mesh& mesh, const AABBWrapper& tree) {

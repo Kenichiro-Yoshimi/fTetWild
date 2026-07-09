@@ -17,7 +17,7 @@
 
 #define TET_MODIFIED 100
 
-void floatTetWild::edge_splitting(Mesh& mesh, const AABBWrapper& tree) {
+int floatTetWild::edge_splitting(Mesh& mesh, const AABBWrapper& tree) {
     auto &tets = mesh.tets;
     auto &tet_vertices = mesh.tet_vertices;
 
@@ -118,6 +118,7 @@ void floatTetWild::edge_splitting(Mesh& mesh, const AABBWrapper& tree) {
 #endif
 
     cout<<"success = "<<suc_counter<<"("<<counter<<")"<<endl;
+    return suc_counter;
 }
 
 bool floatTetWild::split_an_edge(Mesh& mesh, int v1_id, int v2_id, bool is_repush,

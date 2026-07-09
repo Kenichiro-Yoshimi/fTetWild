@@ -18,9 +18,15 @@ namespace floatTetWild {
     void optimization(const std::vector<Vector3> &input_vertices, const std::vector<Vector3i> &input_faces, const std::vector<int> &input_tags, std::vector<bool> &is_face_inserted,
             Mesh &mesh, AABBWrapper& tree, const std::array<int, 4> &ops = {{1, 1, 1, 1}});
     void cleanup_empty_slots(Mesh &mesh, double percentage = 0.7);
-    void operation(const std::vector<Vector3> &input_vertices, const std::vector<Vector3i> &input_faces, const std::vector<int> &input_tags, std::vector<bool> &is_face_inserted,
+    // Returns the total number of accepted local operations (untangle fixes +
+    // splits + collapses + swaps + smoothing moves) performed in this pass.
+    // A return of 0 means the mesh was not modified at all.
+    int operation(const std::vector<Vector3> &input_vertices, const std::vector<Vector3i> &input_faces, const std::vector<int> &input_tags, std::vector<bool> &is_face_inserted,
             Mesh &mesh, AABBWrapper& tree, const std::array<int, 5> &ops = {{1, 1, 1, 1, 1}});
-    bool update_scaling_field(Mesh &mesh, Scalar max_energy);
+    // Returns whether the refinement hit the minimum edge length bound.
+    // If field_changed is non-null, it is set to whether any vertex's
+    // sizing_scalar was actually modified by this call.
+    bool update_scaling_field(Mesh &mesh, Scalar max_energy, bool *field_changed = nullptr);
     void compute_surface_based_sizing(Mesh &mesh);
 
     int get_max_p(const Mesh &mesh);
@@ -96,7 +102,8 @@ namespace floatTetWild {
     void check_envelope(Mesh& mesh, const AABBWrapper& tree);
     void output_surface(Mesh& mesh, const std::string& filename);
 
-    void untangle(Mesh &mesh);
+    // Returns the number of tangled elements fixed.
+    int untangle(Mesh &mesh);
 }
 
 #endif //FLOATTETWILD_MESHIMPROVEMENT_H

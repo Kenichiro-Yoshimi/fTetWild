@@ -32,13 +32,14 @@
 
 namespace floatTetWild {
 namespace {
-void edge_collapsing_aux(Mesh& mesh, const AABBWrapper& tree, std::vector<std::array<int, 2>> &edges) {
+int edge_collapsing_aux(Mesh& mesh, const AABBWrapper& tree, std::vector<std::array<int, 2>> &edges) {
     auto &tets = mesh.tets;
     auto &tet_vertices = mesh.tet_vertices;
 
     int counter = 0;
     int suc_counter = 0;
     int suc_counter_env = 0;
+    int suc_counter_total = 0;
 
     ////init
     std::priority_queue<ElementInQueue, std::vector<ElementInQueue>, cmp_s> ec_queue;
@@ -151,6 +152,7 @@ void edge_collapsing_aux(Mesh& mesh, const AABBWrapper& tree, std::vector<std::a
 
         cout << "success(env) = " << suc_counter_env << endl;
         cout << "success = " << suc_counter << "(" << counter << ")" << endl;
+        suc_counter_total += suc_counter;
 
 #if EC_POSTPROCESS
         if (suc_counter == 0)
@@ -195,12 +197,14 @@ void edge_collapsing_aux(Mesh& mesh, const AABBWrapper& tree, std::vector<std::a
         inf_e_tss = std::vector<int>(inf_es.size(), ts);
 #endif
     } while (suc_counter > 0);
+
+    return suc_counter_total;
 }
 
 }
 }
 
-void floatTetWild::edge_collapsing(Mesh& mesh, const AABBWrapper& tree) {
+int floatTetWild::edge_collapsing(Mesh& mesh, const AABBWrapper& tree) {
     auto &tet_vertices = mesh.tet_vertices;
     auto &tets = mesh.tets;
 
@@ -262,7 +266,7 @@ void floatTetWild::edge_collapsing(Mesh& mesh, const AABBWrapper& tree) {
 //         t.scalar = 0;
 // #else
     get_all_edges(mesh, edges);
-    edge_collapsing_aux(mesh, tree, edges);
+    return edge_collapsing_aux(mesh, tree, edges);
 // #endif
 }
 
