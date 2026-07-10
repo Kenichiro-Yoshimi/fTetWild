@@ -213,6 +213,19 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
     int cnt_increase_epsilon = mesh.params.stage - 1;
     int zero_suc_streak = 0;
     int passes_since_param_change = 0;
+    const Scalar min_rel_improve = 1e-3;
+    // max_energy at the last update_scaling_field call; used to skip
+    // re-refining when the optimization stalls at the same plateau value.
+    Scalar last_update_max_energy = -1;
+    // whether the last update still deepened the core refinement zone; while
+    // true, repeated updates at the same plateau are productive (each halves
+    // the local sizing until the floor) and must not be skipped.
+    bool last_update_refine_active = true;
+    bool refine_skipped = false;
+    // best-so-far energies for the long-window stagnation stop
+    Scalar best_max_energy = std::numeric_limits<Scalar>::max();
+    Scalar best_avg_energy = std::numeric_limits<Scalar>::max();
+    int passes_since_best_improve = 0;
     for (int it = 0; it < mesh.params.max_its; it++) {
         if (mesh.is_input_all_inserted)
             it_after_al_inserted++;
@@ -258,11 +271,37 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
         get_max_avg_energy(mesh, new_max_energy, new_avg_energy);
         if (!is_just_after_update) {
             if (max_energy - new_max_energy < 5e-1 && (avg_energy - new_avg_energy) / avg_energy < 0.1) {
-                bool field_changed = false;
-                is_hit_min_edge_length =
-                        update_scaling_field(mesh, new_max_energy, &field_changed) || is_hit_min_edge_length;
-                params_changed = params_changed || field_changed;
-                is_just_after_update = true;
+                // If this stall is at the same max_energy as the previous
+                // update_scaling_field call AND that call could no longer
+                // deepen the core refinement (saturated at its floor),
+                // re-refining is provably useless: it only recreates the
+                // refine->recover churn (extra elements, extra passes) without
+                // any chance of resolving the stuck tets. Skip the update so
+                // the sizing field goes quiet and the stagnation stop below
+                // can fire. While the core is still descending (each update
+                // halves the local sizing), repeated updates at the SAME
+                // plateau value are productive -- breakthroughs after several
+                // same-value cycles are real (observed: 6.2e5 -> 33 after ~4
+                // cycles) -- so they must not be skipped.
+                const bool same_plateau =
+                        last_update_max_energy > 0
+                        && std::fabs(new_max_energy - last_update_max_energy) <=
+                               min_rel_improve * last_update_max_energy;
+                if (!(same_plateau && !last_update_refine_active && mesh.is_input_all_inserted)) {
+                    bool field_changed = false;
+                    bool refine_changed = false;
+                    is_hit_min_edge_length =
+                            update_scaling_field(mesh, new_max_energy, &field_changed, &refine_changed) ||
+                            is_hit_min_edge_length;
+                    params_changed = params_changed || field_changed;
+                    last_update_max_energy = new_max_energy;
+                    last_update_refine_active = refine_changed;
+                    is_just_after_update = true;
+                } else {
+                    refine_skipped = true;
+                    cout << "update_scaling_field skipped: stalled at the same max_energy ("
+                         << new_max_energy << ") with saturated refinement" << endl;
+                }
                 if (cnt_increase_epsilon > 0) {
 //                    mesh.params.eps += mesh.params.eps_input / mesh.params.stage;
                     mesh.params.eps += mesh.params.eps_delta;
@@ -298,8 +337,22 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
             break;
         }
 
+        // best-so-far tracking for the long-window stagnation stop: reset the
+        // counter only when max or avg actually beats its best value so far.
+        // Unlike a window-endpoint comparison, this is immune to "temporary
+        // worsening then recovery" oscillations that merely return to the
+        // plateau without real progress.
+        if (new_max_energy < best_max_energy * (1 - min_rel_improve)
+            || new_avg_energy < best_avg_energy * (1 - min_rel_improve))
+            passes_since_best_improve = 0;
+        else
+            passes_since_best_improve++;
+        best_max_energy = std::min(best_max_energy, new_max_energy);
+        best_avg_energy = std::min(best_avg_energy, new_avg_energy);
+
         quality_queue.push_back(std::array<Scalar, 2>({{new_max_energy, new_avg_energy}}));
-        if (is_hit_min_edge_length && mesh.is_input_all_inserted && it_after_al_inserted > M && it > M + N) {
+        if ((is_hit_min_edge_length || refine_skipped)
+            && mesh.is_input_all_inserted && it_after_al_inserted > M && it > M + N) {
             // Early stop 2 (stagnation): stop when neither max nor avg energy
             // improved meaningfully (relative 0.1%) over the last N passes.
             // (The original condition only fired when quality got strictly
@@ -308,37 +361,34 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
             // update_scaling_field, whose refinement takes a few passes to pay
             // off (split -> collapse -> swap -> smooth), so a plateau is only
             // final once the sizing field and eps have been unchanged for a
-            // full window. Otherwise a temporary plateau right before a
-            // refinement-driven recovery would be cut short.
-            static const Scalar min_rel_improve = 1e-3;
+            // full window. The same-plateau skip above stops re-refining a
+            // dead plateau, so the field goes quiet and this gate opens after
+            // N passes. refine_skipped also qualifies as "refinement is
+            // exhausted" even when the floor was never hit.
             if (passes_since_param_change >= N
                 && quality_queue[it][0] - quality_queue[it - N][0] >=
                     -min_rel_improve * quality_queue[it - N][0]
                 && quality_queue[it][1] - quality_queue[it - N][1] >=
                     -min_rel_improve * quality_queue[it - N][1]) {
                 cout << "///////////////// energy stagnated for " << N
-                     << " passes at the refinement floor, stopping early /////////////////" << endl;
+                     << " passes with a quiet sizing field, stopping early /////////////////" << endl;
                 break;
             }
+        }
 
-            // Early stop 3 (long-window stagnation): on a dead plateau,
-            // update_scaling_field keeps oscillating the sizing field forever
-            // (refine x0.5 on every stall, recover x1.5 elsewhere), so
-            // passes_since_param_change may never open the gate above. A
-            // refinement cycle pays off within a few passes, so if a much
-            // longer window shows no energy progress at all, the plateau is
-            // final regardless of the field still being touched.
-            const int NL = 3 * N;
-            if (it > M + NL
-                && quality_queue[it][0] - quality_queue[it - NL][0] >=
-                    -min_rel_improve * quality_queue[it - NL][0]
-                && quality_queue[it][1] - quality_queue[it - NL][1] >=
-                    -min_rel_improve * quality_queue[it - NL][1]) {
-                cout << "///////////////// energy stagnated for " << NL
-                     << " passes (sizing field still oscillating), stopping early /////////////////" << endl;
-                break;
-            }
+        // Early stop 3 (long-window stagnation, best-so-far): if neither max
+        // nor avg energy has beaten its best-so-far value for 3N passes, the
+        // plateau is final regardless of the sizing field still being touched.
+        // A productive refinement cycle pays off (and improves the best)
+        // within a few passes, so 3N covers several full cycles.
+        if (mesh.is_input_all_inserted && it_after_al_inserted > M
+            && passes_since_best_improve >= 3 * N) {
+            cout << "///////////////// no best-energy improvement for " << passes_since_best_improve
+                 << " passes, stopping early /////////////////" << endl;
+            break;
+        }
 
+        {
 //            bool is_break = true;
 //            for (int j = 0; j < N; j++) {
 //                if (quality_queue[it - j][0] - quality_queue[it - j - 1][0] < 0) {
@@ -377,13 +427,33 @@ void floatTetWild::optimization(const std::vector<Vector3> &input_vertices, cons
     }
 
     const int maxIter = 10;
+    // Same early-out logic as the main loop: on a dead plateau these passes
+    // can never reach the target energy, so stop as soon as they stop paying.
+    Scalar pp_best_max = std::numeric_limits<Scalar>::max();
+    Scalar pp_best_avg = std::numeric_limits<Scalar>::max();
+    int pp_no_improve = 0;
     for (int i = 0; i < maxIter; ++i) {
-        operation(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree, std::array<int, 5>({ {1, 1, 1, 1, 0} }));
+        const int pp_suc_ops = operation(input_vertices, input_faces, input_tags, is_face_inserted, mesh, tree,
+                                         std::array<int, 5>({ {1, 1, 1, 1, 0} }));
 
         Scalar new_max_energy, new_avg_energy;
         get_max_avg_energy(mesh, new_max_energy, new_avg_energy);
         if(new_max_energy < 10)
             break;
+        if (pp_suc_ops == 0) {
+            cout << "postprocessing: fixed point, stopping" << endl;
+            break;
+        }
+        if (new_max_energy < pp_best_max * (1 - 1e-3) || new_avg_energy < pp_best_avg * (1 - 1e-3))
+            pp_no_improve = 0;
+        else
+            pp_no_improve++;
+        pp_best_max = std::min(pp_best_max, new_max_energy);
+        pp_best_avg = std::min(pp_best_avg, new_avg_energy);
+        if (pp_no_improve >= 2) {
+            cout << "postprocessing: no best-energy improvement for 2 passes, stopping" << endl;
+            break;
+        }
     }
 }
 
@@ -648,7 +718,8 @@ int floatTetWild::operation(const std::vector<Vector3> &input_vertices, const st
 }
 
 #include <geogram/points/kd_tree.h>
-bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy, bool *field_changed) {
+bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy, bool *field_changed,
+                                        bool *refine_changed) {
 //    return false;
 
     auto &tets = mesh.tets;
@@ -767,6 +838,8 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy, bool *fie
     // update scalars
     if (field_changed)
         *field_changed = false;
+    if (refine_changed)
+        *refine_changed = false;
     const bool has_local_targets = !mesh.params.local_bboxes.empty();
     for (int i=0;i< tet_vertices.size();i++) {
         auto& v = tet_vertices[i];
@@ -802,6 +875,12 @@ bool floatTetWild::update_scaling_field(Mesh &mesh, Scalar max_energy, bool *fie
 
         if (field_changed && v.sizing_scalar != old_sizing_scalar)
             *field_changed = true;
+        // Core refinement zone: did this call actually deepen the refinement?
+        // At the floor the clamp leaves sizing unchanged, so a saturated core
+        // reports false even though the recover side keeps churning the field.
+        if (refine_changed && scale_multipliers[i] <= 0.75
+            && v.sizing_scalar < old_sizing_scalar * (1 - 0.01))
+            *refine_changed = true;
     }
 
     cout << "is_hit_min_edge_length = " << is_hit_min_edge_length << endl;

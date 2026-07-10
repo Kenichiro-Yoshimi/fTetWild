@@ -26,7 +26,12 @@ namespace floatTetWild {
     // Returns whether the refinement hit the minimum edge length bound.
     // If field_changed is non-null, it is set to whether any vertex's
     // sizing_scalar was actually modified by this call.
-    bool update_scaling_field(Mesh &mesh, Scalar max_energy, bool *field_changed = nullptr);
+    // If refine_changed is non-null, it is set to whether the CORE refinement
+    // zone (scale multiplier <= 0.75) actually lowered any sizing_scalar by a
+    // meaningful amount. false means the refinement is saturated at its floor
+    // and calling again at the same stall can not deepen it further.
+    bool update_scaling_field(Mesh &mesh, Scalar max_energy, bool *field_changed = nullptr,
+                              bool *refine_changed = nullptr);
     void compute_surface_based_sizing(Mesh &mesh);
 
     int get_max_p(const Mesh &mesh);
