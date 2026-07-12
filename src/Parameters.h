@@ -129,9 +129,9 @@ class Parameters
 
     bool use_general_wn = false;
 
-    // Octree background grid: use adaptive octree instead of uniform grid
-//    bool use_octree = false;
-    bool use_octree = true;
+    // Octree background grid: use adaptive octree instead of uniform grid.
+    // Off by default; opt in with --octree (--no-octree forces it off).
+    bool use_octree = false;
     // Maximum octree depth (0 = auto)
     int octree_max_depth = 0;
     // Far-field grid spacing for octree (0 = auto, uses bbox_diag * box_scale)
